@@ -13,7 +13,7 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=f:\\AWORK\\Vscode\\IPET_TEST0513\\ESP-OTA\\build"
+    "--compile-commands-dir=f:\\AWORK\\Vscode\\IPET_TEST0514\\OTA\\build"
   ],
   "idf.flashType": "UART"
 }

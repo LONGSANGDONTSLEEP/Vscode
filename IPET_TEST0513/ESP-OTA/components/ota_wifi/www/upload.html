@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>ESP OTA Upload</title>
+    <style>
+      body{font-family:Arial,Helvetica,sans-serif;margin:20px}
+      #progress{width:100%;background:#eee;border:1px solid #ccc;height:18px;margin-top:10px}
+      #bar{height:100%;width:0;background:#4caf50}
+      #status{margin-top:10px}
+    </style>
+  </head>
+  <body>
+    <h3>ESP32 OTA Upload</h3>
+    <form id="uploadForm" method="POST" action="/upload" enctype="multipart/form-data">
+      <input type="file" id="file" name="firmware" required>
+      <input type="submit" value="Upload">
+    </form>
+    <div id="status"></div>
+    <div id="progress" style="display:none"><div id="bar"></div></div>
+
+    <script>
+      const form = document.getElementById('uploadForm');
+      const status = document.getElementById('status');
+      const progress = document.getElementById('progress');
+      const bar = document.getElementById('bar');
+
+      form.addEventListener('submit', function(e){
+        e.preventDefault();
+        const fileInput = document.getElementById('file');
+        if(!fileInput.files.length){ status.textContent='请选择固件文件'; return; }
+        const file = fileInput.files[0];
+        const fd = new FormData();
+        fd.append('firmware', file);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/upload', true);
+
+        xhr.onload = function(){
+          if(xhr.status === 200){
+            status.textContent = '上传成功，设备将重启。页面将在3秒后返回根页面。';
+            setTimeout(function(){ window.location.href = '/'; }, 3000);
+          } else {
+            status.textContent = '上传失败: ' + xhr.status + ' ' + xhr.responseText;
+          }
+        };
+        xhr.onerror = function(){ status.textContent = '上传时网络错误'; };
+        xhr.upload.onprogress = function(e){
+          if(e.lengthComputable){
+            progress.style.display = 'block';
+            const pct = Math.round((e.loaded / e.total) * 100);
+            bar.style.width = pct + '%';
+          }
+        };
+
+        status.textContent = '正在上传...';
+        xhr.send(fd);
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,21 @@
+# components/gpio_drv/Kconfig
+
+menu "GPIO Driver Configuration"
+
+config GPIO_OUTPUT_0
+    int "GPIO Output 0"
+    default 10
+
+config GPIO_OUTPUT_1
+    int "GPIO Output 1"
+    default 2
+
+config GPIO_INPUT_0
+    int "GPIO Input 0"
+    default 0
+
+config GPIO_INPUT_1
+    int "GPIO Input 1"
+    default 4
+
+endmenu
