@@ -1,4 +1,5 @@
-// pwrkeep.h - 电源保持与按键长按关机组件
+// pwrkeep.h
+
 #pragma once
 
 #include "esp_err.h"
@@ -8,12 +9,23 @@
 extern "C" {
 #endif
 
-// 初始化电源保持，并启动按键检测任务
-// - 上电后立即将 PWRKEEP(GPIO 配置项) 拉高以维持供电
-// - 运行时检测按键长按，达到阈值后将 PWRKEEP 拉低以关闭电源
+/**
+ * @brief 初始化电源保持模块
+ *
+ * 功能：
+ * 1. 拉高 PWR_KEEP 保持供电
+ * 2. 启动按键检测任务
+ * 3. 支持长按自动关机
+ */
 esp_err_t pwrkeep_init(void);
 
-// 手动控制保持引脚（高=保持，低=释放）
+/**
+ * @brief 手动控制电源保持
+ *
+ * @param enable
+ * true  = 保持供电
+ * false = 断电
+ */
 void pwrkeep_set_hold(bool enable);
 
 #ifdef __cplusplus
