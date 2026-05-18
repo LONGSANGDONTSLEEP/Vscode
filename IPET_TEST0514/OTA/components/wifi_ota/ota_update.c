@@ -113,75 +113,207 @@ esp_err_t ota_update_start(const ota_update_config_t *config)
 
     emit_cb(config, OTA_UPDATE_EVENT_STARTED, 0, ESP_OK);
     ESP_LOGI(TAG, "starting OTA from: %s", config->url);
+    /* 根据 URL 协议选择实现：
+       - https:// 使用 esp_https_ota (内置 TLS 支持)
+       - http://  使用 esp_http_client + esp_ota_xxx 手工下载并写入分区 */
 
-    esp_http_client_config_t http_cfg = {
-        .url = config->url,
-        .cert_pem = config->cert_pem,
-        .timeout_ms = config->timeout_ms > 0 ? config->timeout_ms : 10000,
-        .keep_alive_enable = true,
-        .skip_cert_common_name_check = config->skip_cert_common_name_check,
-    };
+    if (strncmp(config->url, "https://", 8) == 0) {
+        esp_http_client_config_t http_cfg = {
+            .url = config->url,
+            .cert_pem = config->cert_pem,
+            .timeout_ms = config->timeout_ms > 0 ? config->timeout_ms : 10000,
+            .keep_alive_enable = true,
+            .skip_cert_common_name_check = config->skip_cert_common_name_check,
+        };
 
-    esp_https_ota_config_t ota_cfg = {
-        .http_config = &http_cfg,
-    };
+        esp_https_ota_config_t ota_cfg = {
+            .http_config = &http_cfg,
+        };
 
-    esp_https_ota_handle_t ota_handle = NULL;
-    esp_err_t err = esp_https_ota_begin(&ota_cfg, &ota_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_https_ota_begin failed: %s", esp_err_to_name(err));
-        emit_cb(config, OTA_UPDATE_EVENT_FAILED, 0, err);
-        return err;
-    }
+        esp_https_ota_handle_t ota_handle = NULL;
+        esp_err_t err = esp_https_ota_begin(&ota_cfg, &ota_handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_https_ota_begin failed: %s", esp_err_to_name(err));
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, 0, err);
+            return err;
+        }
 
-    int last_progress = -1;
-    while (1) {
-        err = esp_https_ota_perform(ota_handle);
+        int last_progress = -1;
+        while (1) {
+            err = esp_https_ota_perform(ota_handle);
 
-        int downloaded = esp_https_ota_get_image_len_read(ota_handle);
-        int total = esp_https_ota_get_image_size(ota_handle);
-        if (total > 0) {
-            int progress = downloaded * 100 / total;
-            if (progress != last_progress) {
-                last_progress = progress;
-                ESP_LOGI(TAG, "OTA progress: %d%% (%d/%d bytes)", progress, downloaded, total);
-                emit_cb(config, OTA_UPDATE_EVENT_PROGRESS, progress, ESP_OK);
+            int downloaded = esp_https_ota_get_image_len_read(ota_handle);
+            int total = esp_https_ota_get_image_size(ota_handle);
+            if (total > 0) {
+                int progress = downloaded * 100 / total;
+                if (progress != last_progress) {
+                    last_progress = progress;
+                    ESP_LOGI(TAG, "OTA progress: %d%% (%d/%d bytes)", progress, downloaded, total);
+                    emit_cb(config, OTA_UPDATE_EVENT_PROGRESS, progress, ESP_OK);
+                }
+            }
+
+            if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+                break;
             }
         }
 
-        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-            break;
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_https_ota_perform failed: %s", esp_err_to_name(err));
+            esp_https_ota_abort(ota_handle);
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, last_progress < 0 ? 0 : last_progress, err);
+            return err;
         }
+
+        if (!esp_https_ota_is_complete_data_received(ota_handle)) {
+            ESP_LOGE(TAG, "complete firmware image was not received");
+            esp_https_ota_abort(ota_handle);
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, last_progress < 0 ? 0 : last_progress, ESP_FAIL);
+            return ESP_FAIL;
+        }
+
+        err = esp_https_ota_finish(ota_handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_https_ota_finish failed: %s", esp_err_to_name(err));
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, last_progress < 0 ? 0 : last_progress, err);
+            return err;
+        }
+
+        ESP_LOGI(TAG, "OTA success; new firmware will boot after restart");
+        emit_cb(config, OTA_UPDATE_EVENT_SUCCESS, 100, ESP_OK);
+
+        if (config->reboot_after_success) {
+            ESP_LOGI(TAG, "restarting...");
+            esp_restart();
+        }
+
+        return ESP_OK;
+    } else if (strncmp(config->url, "http://", 7) == 0) {
+        /* HTTP 不走 esp_https_ota；手工下载并写入 OTA 分区 */
+        esp_http_client_config_t http_cfg = {
+            .url = config->url,
+            .timeout_ms = config->timeout_ms > 0 ? config->timeout_ms : 10000,
+            .keep_alive_enable = true,
+        };
+
+        esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
+        if (!client) {
+            ESP_LOGE(TAG, "esp_http_client_init failed");
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, 0, ESP_FAIL);
+            return ESP_FAIL;
+        }
+
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_http_client_open failed: %s", esp_err_to_name(err));
+            esp_http_client_cleanup(client);
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, 0, err);
+            return err;
+        }
+
+        /* 获取内容长度（可能为 -1 表示未知） */
+        esp_http_client_fetch_headers(client);
+        int content_length = esp_http_client_get_content_length(client);
+
+        const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+        if (!update_partition) {
+            ESP_LOGE(TAG, "no update partition found");
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, 0, ESP_FAIL);
+            return ESP_FAIL;
+        }
+
+        esp_ota_handle_t ota_handle = 0;
+        size_t image_size = (content_length > 0) ? (size_t)content_length : 0;
+        err = esp_ota_begin(update_partition, image_size, &ota_handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, 0, err);
+            return err;
+        }
+
+        const int BUF_SIZE = 4096;
+        char *buf = malloc(BUF_SIZE);
+        if (!buf) {
+            ESP_LOGE(TAG, "alloc buffer failed");
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            esp_ota_abort(ota_handle);
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, 0, ESP_ERR_NO_MEM);
+            return ESP_ERR_NO_MEM;
+        }
+
+        int last_progress = -1;
+        int total = content_length;
+        int written = 0;
+        while (1) {
+            int r = esp_http_client_read(client, buf, BUF_SIZE);
+            if (r < 0) {
+                ESP_LOGE(TAG, "esp_http_client_read error: %d", r);
+                err = ESP_FAIL;
+                break;
+            } else if (r == 0) {
+                /* 下载结束 */
+                err = ESP_OK;
+                break;
+            }
+
+            err = esp_ota_write(ota_handle, (const void *)buf, (size_t)r);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(err));
+                break;
+            }
+
+            written += r;
+            if (total > 0) {
+                int progress = written * 100 / total;
+                if (progress != last_progress) {
+                    last_progress = progress;
+                    ESP_LOGI(TAG, "OTA progress: %d%% (%d/%d bytes)", progress, written, total);
+                    emit_cb(config, OTA_UPDATE_EVENT_PROGRESS, progress, ESP_OK);
+                }
+            }
+        }
+
+        free(buf);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+
+        if (err != ESP_OK) {
+            esp_ota_abort(ota_handle);
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, last_progress < 0 ? 0 : last_progress, err);
+            return err;
+        }
+
+        err = esp_ota_end(ota_handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, last_progress < 0 ? 0 : last_progress, err);
+            return err;
+        }
+
+        /* 设置为引导分区 */
+        err = esp_ota_set_boot_partition(update_partition);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
+            emit_cb(config, OTA_UPDATE_EVENT_FAILED, last_progress < 0 ? 0 : last_progress, err);
+            return err;
+        }
+
+        ESP_LOGI(TAG, "OTA success; new firmware will boot after restart");
+        emit_cb(config, OTA_UPDATE_EVENT_SUCCESS, 100, ESP_OK);
+        if (config->reboot_after_success) {
+            ESP_LOGI(TAG, "restarting...");
+            esp_restart();
+        }
+
+        return ESP_OK;
+    } else {
+        ESP_LOGE(TAG, "unsupported URL scheme: %s", config->url);
+        emit_cb(config, OTA_UPDATE_EVENT_FAILED, 0, ESP_ERR_INVALID_ARG);
+        return ESP_ERR_INVALID_ARG;
     }
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_https_ota_perform failed: %s", esp_err_to_name(err));
-        esp_https_ota_abort(ota_handle);
-        emit_cb(config, OTA_UPDATE_EVENT_FAILED, last_progress < 0 ? 0 : last_progress, err);
-        return err;
-    }
-
-    if (!esp_https_ota_is_complete_data_received(ota_handle)) {
-        ESP_LOGE(TAG, "complete firmware image was not received");
-        esp_https_ota_abort(ota_handle);
-        emit_cb(config, OTA_UPDATE_EVENT_FAILED, last_progress < 0 ? 0 : last_progress, ESP_FAIL);
-        return ESP_FAIL;
-    }
-
-    err = esp_https_ota_finish(ota_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_https_ota_finish failed: %s", esp_err_to_name(err));
-        emit_cb(config, OTA_UPDATE_EVENT_FAILED, last_progress < 0 ? 0 : last_progress, err);
-        return err;
-    }
-
-    ESP_LOGI(TAG, "OTA success; new firmware will boot after restart");
-    emit_cb(config, OTA_UPDATE_EVENT_SUCCESS, 100, ESP_OK);
-
-    if (config->reboot_after_success) {
-        ESP_LOGI(TAG, "restarting...");
-        esp_restart();
-    }
-
-    return ESP_OK;
 }

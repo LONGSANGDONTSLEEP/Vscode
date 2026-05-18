@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "led_ctrl.h"
+#include "bluetooth_ota.h"
 
 // ========== 在这里填写你的 Wi‑Fi 名称和密码（直接修改下面两行） ==========
 // 示例：
@@ -28,6 +29,19 @@ static void trigger_ota(void)
     ota_update_start_bg(OTA_URL, NULL);
 }
 
+/* 简单的蓝牙 OTA 启动封装函数（供 app_main 或按键回调直接调用，便于你修改） */
+static void trigger_bt_ota(void)
+{
+    ESP_LOGI("OTA_CMD", "Triggering Bluetooth OTA server");
+    /* 简化：在 main 中只保留最简单的调用接口，具体行为在组件内实现或由你修改 */
+    esp_err_t err = bluetooth_ota_init();
+    if (err == ESP_OK) {
+        bluetooth_ota_start_server();
+    } else {
+        ESP_LOGW("OTA_CMD", "bluetooth_ota_init returned %s", esp_err_to_name(err));
+    }
+}
+
 /* 按键回调：当按键按下（假设低电平触发）时启动 OTA（文件级别） */
 static void ota_button_cb(gpio_num_t gpio, uint32_t level)
 {
@@ -39,13 +53,12 @@ static void ota_button_cb(gpio_num_t gpio, uint32_t level)
 void app_main(void)
 {
 
-    // 使用独立的 wifi_manager 组件进行连接
-    // 请确保 components/wifi_manager 已包含在工程中（本仓库已添加）
-    extern bool wifi_manager_connect_blocking(const char *ssid, const char *pass, int timeout_ms);
-    bool ok = wifi_manager_connect_blocking(MY_WIFI_SSID, MY_WIFI_PASS, 15000);
-    if (!ok) {
-        ESP_LOGW("SYS", "WiFi connect failed or timeout");
-    }
+    // WiFi 暂时禁用，使用蓝牙 OTA
+    // 如果你以后需要启用 WiFi：取消注释下面三行并确保 wifi_manager 可用
+    // extern bool wifi_manager_connect_blocking(const char *ssid, const char *pass, int timeout_ms);
+    // bool ok = wifi_manager_connect_blocking(MY_WIFI_SSID, MY_WIFI_PASS, 15000);
+    // if (!ok) { ESP_LOGW("SYS", "WiFi connect failed or timeout"); }
+    ESP_LOGI("SYS", "WiFi disabled in this build; Bluetooth OTA will be used if available");
 
     /* 启动 LED 演示（可选） */
     /* 确保 gpio 驱动已初始化（注册回调/使用 LEDC 需要先初始化 gpio 驱动） */
@@ -60,6 +73,9 @@ void app_main(void)
     } else {
         ESP_LOGI("SYS", "OTA button registered on gpio %d", OTA_BUTTON_GPIO);
     }
+
+    /* 启动蓝牙 OTA 服务（示例）——已启用以便使用 nRF Connect 进行调试 */
+    trigger_bt_ota();
 
     while (1)
     {
