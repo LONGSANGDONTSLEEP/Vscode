@@ -4,6 +4,7 @@
 #include "i2c_bus.h"
 #include "ota_update.h"
 #include "led_ctrl.h"
+#include "pwrkeep.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -35,6 +36,16 @@ void hw_init(void)
     ESP_LOGI("HW_INIT", "Hardware init start");
     check_stack();
 
+    /* 先尽早启动电源保持任务，确保在上电后尽快拉高保持引脚以维持供电。
+       把 pwrkeep_init 放在 gpio_drv_init 之前，避免 gpio_drv 可能的引脚重配置干扰保持引脚。 */
+    ESP_LOGI("HW_INIT", "PWRKEEP init start");
+    esp_err_t pk_err = pwrkeep_init();
+    if (pk_err != ESP_OK) {
+        ESP_LOGE("HW_INIT", "pwrkeep_init failed: %s", esp_err_to_name(pk_err));
+    } else {
+        ESP_LOGI("HW_INIT", "PWRKEEP 初始化完成");
+    }
+
     ESP_LOGI("HW_INIT", "GPIO init start");
     ESP_ERROR_CHECK(gpio_drv_init());
     ESP_LOGI("HW_INIT", "GPIO初始化完成");
@@ -52,13 +63,4 @@ void hw_init(void)
 
     /* 启动 LED demo（默认使用 GPIO48） */
     led_ctrl_demo_start();
-
-
-
-
 }
-
-
-
-
-

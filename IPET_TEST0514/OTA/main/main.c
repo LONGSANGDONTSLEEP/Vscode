@@ -8,7 +8,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "led_ctrl.h"
-#include "bluetooth_ota.h"
 
 // ========== 在这里填写你的 Wi‑Fi 名称和密码（直接修改下面两行） ==========
 // 示例：
@@ -29,18 +28,7 @@ static void trigger_ota(void)
     ota_update_start_bg(OTA_URL, NULL);
 }
 
-/* 简单的蓝牙 OTA 启动封装函数（供 app_main 或按键回调直接调用，便于你修改） */
-static void trigger_bt_ota(void)
-{
-    ESP_LOGI("OTA_CMD", "Triggering Bluetooth OTA server");
-    /* 简化：在 main 中只保留最简单的调用接口，具体行为在组件内实现或由你修改 */
-    esp_err_t err = bluetooth_ota_init();
-    if (err == ESP_OK) {
-        bluetooth_ota_start_server();
-    } else {
-        ESP_LOGW("OTA_CMD", "bluetooth_ota_init returned %s", esp_err_to_name(err));
-    }
-}
+/* 已移除蓝牙 OTA 相关逻辑，如需重新启用请添加相应组件并在此调用 */
 
 /* 按键回调：当按键按下（假设低电平触发）时启动 OTA（文件级别） */
 static void ota_button_cb(gpio_num_t gpio, uint32_t level)
@@ -58,24 +46,19 @@ void app_main(void)
     // extern bool wifi_manager_connect_blocking(const char *ssid, const char *pass, int timeout_ms);
     // bool ok = wifi_manager_connect_blocking(MY_WIFI_SSID, MY_WIFI_PASS, 15000);
     // if (!ok) { ESP_LOGW("SYS", "WiFi connect failed or timeout"); }
-    ESP_LOGI("SYS", "WiFi disabled in this build; Bluetooth OTA will be used if available");
+    ESP_LOGI("SYS", "本版本未启用蓝牙；默认通过 BOOT 键触发 WiFi OTA（请确保已联网）");
 
-    /* 启动 LED 演示（可选） */
-    /* 确保 gpio 驱动已初始化（注册回调/使用 LEDC 需要先初始化 gpio 驱动） */
-    if (gpio_drv_init() != ESP_OK) {
-        ESP_LOGW("SYS", "gpio_drv_init failed");
-    }
-    led_ctrl_demo_start();
+    /* 统一使用硬件初始化入口，避免重复初始化 GPIO/LED/任务 */
+    hw_init();
 
-    /* 注册按键回调（请确保 gpio_drv 已初始化，并在 gpio_drv 中配置了对应 GPIO 为中断输入） */
+    /* 注册按键回调（gpio 驱动由 hw_init 初始化） */
     if (gpio_drv_register_callback(OTA_BUTTON_GPIO, ota_button_cb) != ESP_OK) {
         ESP_LOGW("SYS", "Failed to register OTA button callback (gpio %d)", OTA_BUTTON_GPIO);
     } else {
         ESP_LOGI("SYS", "OTA button registered on gpio %d", OTA_BUTTON_GPIO);
     }
 
-    /* 启动蓝牙 OTA 服务（示例）——已启用以便使用 nRF Connect 进行调试 */
-    trigger_bt_ota();
+    /* 蓝牙 OTA 已移除，不再启动 */
 
     while (1)
     {
