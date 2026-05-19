@@ -1,4 +1,10 @@
 {
-    "idf.customExtraVars": {},
-    "idf.currentSetup": "E:\\ESP-IDF\\V5.5.4\\v5.5.4\\esp-idf"
+  "idf.customExtraVars": {},
+  "idf.currentSetup": "E:\\ESP-IDF\\V5.5.4\\v5.5.4\\esp-idf",
+  "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-19.1.2_20250312\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=f:\\AWORK\\Vscode\\build"
+  ]
 }
