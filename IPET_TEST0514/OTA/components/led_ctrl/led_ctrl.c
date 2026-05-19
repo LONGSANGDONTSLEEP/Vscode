@@ -113,19 +113,26 @@ static void ws2812_send(uint8_t *data, int led_num)
     free(items);
 }
 
-static void led_rainbow_task(void *arg)
+static void led_blink_task(void *arg)
 {
-    uint8_t pos = 0;
+    bool on = false;
+    const TickType_t delay = pdMS_TO_TICKS(500); // 500ms 闪烁周期
     while (1) {
-        uint8_t r, g, b;
-        rainbow_step(pos, &r, &g, &b);
-        // 仅更新第一颗（index 0）的颜色，第二颗由按键逻辑控制
-        s_led_data[0] = g;
-        s_led_data[1] = r;
-        s_led_data[2] = b;
+        if (on) {
+            // 打开第一颗 LED，使用中等亮度的蓝色（可按需修改）
+            s_led_data[0] = 50;  // G
+            s_led_data[1] = 0;   // R
+            s_led_data[2] = 100; // B
+        } else {
+            // 关闭第一颗 LED
+            s_led_data[0] = 0;
+            s_led_data[1] = 0;
+            s_led_data[2] = 0;
+        }
+        // 第二颗 LED 保留给按键逻辑控制，不在此处修改
         ws2812_send(s_led_data, LED_COUNT);
-        pos++;
-        vTaskDelay(pdMS_TO_TICKS(20));
+        on = !on;
+        vTaskDelay(delay);
     }
 }
 
@@ -136,7 +143,7 @@ void led_ctrl_demo_start(void)
     }
 
     ESP_LOGI(TAG, "LED demo started on GPIO%d", s_data_gpio);
-    xTaskCreate(led_rainbow_task, "led_rainbow", 2048, NULL, 5, NULL);
+    xTaskCreate(led_blink_task, "led_blink", 2048, NULL, 5, NULL);
 }
 
 void led_ctrl_shutdown_fade(void)

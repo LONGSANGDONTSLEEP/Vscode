@@ -24,7 +24,7 @@
 #define OTA_BUTTON_GPIO GPIO_NUM_0
 
 #define OTA_URL "http://192.168.1.12:8070/OTA.bin"
-//==============================
+//==============================python -m http.server 8070
 // 日志 TAG
 //==============================
 
