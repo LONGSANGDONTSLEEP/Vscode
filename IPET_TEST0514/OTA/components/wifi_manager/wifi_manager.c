@@ -21,13 +21,28 @@ bool wifi_manager_connect_blocking(const char *ssid, const char *pass, int timeo
         nvs_flash_init();
     }
 
-    esp_netif_init();
-    esp_event_loop_create_default();
-    esp_netif_create_default_wifi_sta();
+    /* Make initialization idempotent: some callers may call this function
+       multiple times (e.g. OTA button pressed more than once). Calling
+       esp_netif_init / esp_event_loop_create_default /
+       esp_netif_create_default_wifi_sta / esp_wifi_init multiple times
+       leads to asserts or errors. Guard these so they run only once. */
+    static bool s_inited = false;
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    esp_wifi_set_mode(WIFI_MODE_STA);
+    if (!s_inited) {
+        esp_netif_init();
+        esp_event_loop_create_default();
+        esp_netif_create_default_wifi_sta();
+
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        esp_err_t wret = esp_wifi_init(&cfg);
+        if (wret != ESP_OK) {
+            ESP_LOGE(TAG, "esp_wifi_init failed: %s", esp_err_to_name(wret));
+            return false;
+        }
+        esp_wifi_set_mode(WIFI_MODE_STA);
+
+        s_inited = true;
+    }
 
     wifi_config_t wifi_config = {0};
     strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid)-1);

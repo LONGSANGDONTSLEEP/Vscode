@@ -21,10 +21,15 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include <stdint.h>
+
+// 不直接包含 led_ctrl.h（避免组件 include 路径依赖），使用外部声明来调用需要的接口
+extern void led_ctrl_shutdown_fade(void);
+extern void led_ctrl_set_led_color(int idx, uint8_t r, uint8_t g, uint8_t b);
 
 #define TAG "PWRKEEP"
 
-/* forward declaration for internal helper used above */
+/* forward declaration for internal helper used below */
 static inline void hold_power(bool en);
 
 void pwrkeep_set_hold(bool enable)
@@ -85,6 +90,7 @@ static inline bool key_is_pressed(void)
     return gpio_get_level(PWR_KEY_GPIO) == KEY_ACTIVE_LEVEL;
 }
 
+/* internal helper: control PWR_KEEP output pin */
 static inline void hold_power(bool en)
 {
     gpio_set_level(
@@ -92,6 +98,8 @@ static inline void hold_power(bool en)
         en ? KEEP_ACTIVE_LEVEL : !KEEP_ACTIVE_LEVEL
     );
 }
+
+
 
 
 
@@ -154,6 +162,11 @@ static void power_off(void)
 
     // 先取消保持
     hold_power(false);
+
+    // 在断电前触发 LED 第二颗淡出（尝试优雅提示）
+    // led_ctrl_shutdown_fade 是阻塞直到完成的（会短暂停顿）
+    extern void led_ctrl_shutdown_fade(void);
+    led_ctrl_shutdown_fade();
 
     // 再切输入下拉
     gpio_config_t cfg = {
@@ -273,6 +286,14 @@ static void pwrkeep_task(void *arg)
 
                 power_off();
             }
+            else {
+                // 在按住过程中，用第二颗 LED 显示红色并缓慢变暗
+                // 亮度随剩余时间线性减小，从 255 到 0
+                uint32_t rem = (press_ms >= LONG_PRESS_MS) ? 0 : (LONG_PRESS_MS - press_ms);
+                uint8_t val = (uint8_t)((rem * 255) / LONG_PRESS_MS);
+                // idx=1 为第二颗灯（0-based）
+                led_ctrl_set_led_color(1, val, 0, 0);
+            }
         }
         else {
 
@@ -283,6 +304,9 @@ static void pwrkeep_task(void *arg)
                          "key released: %d ms",
                          press_ms);
             }
+
+            // 松开时关闭第二颗灯
+            led_ctrl_set_led_color(1, 0, 0, 0);
 
             press_ms = 0;
         }

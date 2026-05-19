@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES hwinit
+    REQUIRES hwinit wifi_manager wifi_ota
 )

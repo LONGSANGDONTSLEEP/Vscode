@@ -4,6 +4,7 @@
 #include "ota_update.h"
 #include "gpio_drv.h"
 #include "pwrkeep.h"
+#include "wifi_manager.h"
 
 #include "esp_log.h"
 
@@ -36,6 +37,12 @@ static void trigger_ota(void){
     ESP_LOGI(TAG,
              "Trigger OTA:%s",
              OTA_URL);
+
+/*确保在启动 OTA 前 Wi-Fi 网络栈已准备并已连接（防止在未初始化 tcpip stack 时调用 getaddrinfo 导致 panic）*/
+    if(!wifi_manager_connect_blocking(MY_WIFI_SSID,MY_WIFI_PASS,15000))    {
+        ESP_LOGW(TAG,"WiFi not connected,abort OTA");
+        return;
+    }
 
     ota_update_start_bg(OTA_URL,NULL);
 }
