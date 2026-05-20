@@ -56,7 +56,8 @@ void hw_init(void)
 
     
     ESP_LOGI("HW_INIT", "I2C init start");
-    i2c_bus_init(&bus, I2C_NUM_0, CONFIG_I2C_BUS_SDA_GPIO, CONFIG_I2C_BUS_SCL_GPIO, 400000);
+    // 使用明确的引脚（SDA=IO13, SCL=IO12），避免 CONFIG 配置不一致导致总线与硬件接线不符
+    i2c_bus_init(&bus, I2C_NUM_0, 13, 12, 400000);
     i2c_bus_add_device(bus, 0x68, &dev);
     ESP_LOGI("HW_INIT", "I2C初始化完成");
     check_stack();

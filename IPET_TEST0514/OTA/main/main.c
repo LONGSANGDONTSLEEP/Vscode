@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 
 #include "led_ctrl.h"
+#include "qmi8658a.h"
 //==============================
 // WiFi 配置
 //==============================
@@ -74,7 +75,6 @@ void app_main(void){
 
         ESP_LOGE(TAG,
                  "pwrkeep init failed");
-
         return;
     }
 
@@ -88,6 +88,14 @@ void app_main(void){
 
     ESP_LOGI(TAG,
              "hardware init done");
+    // 初始化并启动 QMI8658A 组件（内部会将 device 添加到 bus 并创建周期读取任务）
+    extern i2c_master_bus_handle_t bus;
+    esp_err_t qr = qmi8658a_start(bus, 13, 12); // SDA=IO13, SCL=IO12
+    if (qr != ESP_OK) {
+        ESP_LOGW(TAG, "qmi8658a start failed: %d", qr);
+    } else {
+        ESP_LOGI(TAG, "qmi8658a started");
+    }
 //==================================================
 // WiFi 提示
 //==================================================
