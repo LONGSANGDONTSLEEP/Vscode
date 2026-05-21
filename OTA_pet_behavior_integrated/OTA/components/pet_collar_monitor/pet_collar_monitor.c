@@ -10,6 +10,7 @@
 
 #include "pet_data_logger.h"
 #include "pet_telemetry.h"
+#include "pet_file_uploader.h"
 
 #define TAG "PET_MON"
 
@@ -21,6 +22,7 @@ static pet_behavior_result_t s_last_result;
 static bool s_have_result;
 static bool s_logger_ready;
 static bool s_telemetry_ready;
+static bool s_file_uploader_ready;
 
 static uint32_t now_ms(void)
 {
@@ -82,6 +84,43 @@ static void pet_monitor_task(void *arg)
     {
         s_telemetry_ready = false;
         ESP_LOGI(TAG, "pet telemetry disabled");
+    }
+
+    /*
+     * 初始化 CSV 文件上传器。
+     * 它会上传已经轮转完成的 Sxxxxxx.CSV / Exxxxxx.CSV。
+     * 当前正在写的分段不会上传。
+     */
+    if (s_logger_ready &&
+        s_cfg.enable_file_upload &&
+        s_cfg.file_upload_url &&
+        s_cfg.file_upload_url[0])
+    {
+
+        pet_file_uploader_config_t file_cfg = {
+            .url = s_cfg.file_upload_url,
+            .scan_interval_ms = s_cfg.file_upload_scan_interval_ms ? s_cfg.file_upload_scan_interval_ms : 60000,
+            .task_stack_size = 6144,
+            .task_priority = 3,
+            .timeout_ms = 5000,
+        };
+
+        esp_err_t up_ret = pet_file_uploader_start(&file_cfg);
+        if (up_ret == ESP_OK)
+        {
+            s_file_uploader_ready = true;
+            ESP_LOGI(TAG, "pet file uploader ready: %s", s_cfg.file_upload_url);
+        }
+        else
+        {
+            s_file_uploader_ready = false;
+            ESP_LOGW(TAG, "pet file uploader unavailable: %s", esp_err_to_name(up_ret));
+        }
+    }
+    else
+    {
+        s_file_uploader_ready = false;
+        ESP_LOGI(TAG, "pet file uploader disabled");
     }
 
     /*
@@ -299,10 +338,14 @@ esp_err_t pet_collar_monitor_stop(void)
         pet_telemetry_stop();
     }
 
+    if (s_file_uploader_ready)
+    {
+        pet_file_uploader_stop();
+    }
     s_have_result = false;
     s_logger_ready = false;
     s_telemetry_ready = false;
-
+    s_file_uploader_ready = false;
 
     return ESP_OK;
 }

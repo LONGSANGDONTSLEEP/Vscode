@@ -10,28 +10,32 @@
 extern "C" {
 #endif
 
-/**
- * @brief 初始化宠物数据记录器。
- *
- * 会检查 SD 卡是否已经挂载。
- * 如果 /sdcard/pet_state.csv 或 /sdcard/pet_event.csv 不存在，会自动写入 CSV 表头。
- */
 esp_err_t pet_data_logger_init(void);
-
-/**
- * @brief 是否已经初始化成功。
- */
 bool pet_data_logger_is_ready(void);
 
-/**
- * @brief 写入一行状态数据到 /sdcard/pet_state.csv。
- */
 esp_err_t pet_data_logger_write_state(uint32_t now_ms, const pet_behavior_result_t *result);
+esp_err_t pet_data_logger_write_event(uint32_t now_ms, const pet_behavior_result_t *result);
 
 /**
- * @brief 如果 result->events != PET_EVENT_NONE，则写入一行事件数据到 /sdcard/pet_event.csv。
+ * @brief 获取当前测试 session 目录。
+ *
+ * 例如：
+ * /sdcard/D260521/T125011/2b324939
  */
-esp_err_t pet_data_logger_write_event(uint32_t now_ms, const pet_behavior_result_t *result);
+const char *pet_data_logger_get_session_dir(void);
+
+/**
+ * @brief 获取当前正在写入的分段编号。
+ *
+ * 当前正在写 S000003.CSV 时，返回 3。
+ * 上传器只上传小于当前编号的文件。
+ */
+uint32_t pet_data_logger_get_current_segment(void);
+
+/**
+ * @brief 手动切换到下一个分段文件。
+ */
+esp_err_t pet_data_logger_force_rotate(void);
 
 #ifdef __cplusplus
 }

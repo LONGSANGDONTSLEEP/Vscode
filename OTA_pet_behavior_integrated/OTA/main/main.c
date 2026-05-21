@@ -25,6 +25,7 @@
 #define OTA_BUTTON_GPIO GPIO_NUM_0
 #define OTA_URL "http://192.168.1.12:8070/OTA.bin" // 本地测试：python -m http.server 8070
 #define PET_HTTP_URL "http://192.168.1.12:8080/pet"
+#define PET_FILE_UPLOAD_URL "http://192.168.1.12:8080/upload"
 
 static const char *TAG = "SYS";
 
@@ -105,6 +106,10 @@ static void start_pet_monitor(bool enable_http_upload)
         .enable_http_upload = enable_http_upload,
         .http_url = PET_HTTP_URL,
         .http_timeout_ms = 2000,
+
+        .enable_file_upload = enable_http_upload,
+        .file_upload_url = PET_FILE_UPLOAD_URL,
+        .file_upload_scan_interval_ms = 60000,
     };
 
     esp_err_t ret = pet_collar_monitor_start(&cfg);
