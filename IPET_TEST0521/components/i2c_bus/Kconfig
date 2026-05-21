@@ -1,0 +1,13 @@
+# components/i2c_bus/Kconfig
+
+menu "I2C Driver Configuration"
+
+config I2C_BUS_SDA_GPIO
+    int "I2C SDA GPIO"
+    default 8
+
+config I2C_BUS_SCL_GPIO
+    int "I2C SCL GPIO"
+    default 9
+
+endmenu
