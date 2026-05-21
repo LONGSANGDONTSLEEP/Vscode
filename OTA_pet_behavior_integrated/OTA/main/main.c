@@ -7,6 +7,7 @@
 #include "qmi8658a.h"
 #include "wifi_manager.h"
 #include "pet_time.h"
+#include "pet_config.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -28,6 +29,7 @@
 #define PET_FILE_UPLOAD_URL "http://192.168.1.12:8080/upload"
 
 static const char *TAG = "SYS";
+static pet_config_t s_app_cfg;
 
 //==============================
 // OTA 启动
@@ -36,8 +38,7 @@ static void trigger_ota(void)
 {
     ESP_LOGI(TAG, "Trigger OTA: %s", OTA_URL);
 
-    // 确保在启动 OTA 前 Wi-Fi 网络栈已准备并已连接。
-    if (!wifi_manager_connect_blocking(MY_WIFI_SSID, MY_WIFI_PASS, 15000))
+    if (!wifi_manager_connect_blocking(s_app_cfg.wifi_ssid, s_app_cfg.wifi_pass, 15000))
     {
         ESP_LOGW(TAG, "WiFi not connected, abort OTA");
         return;
@@ -50,14 +51,10 @@ static bool start_wifi_for_telemetry(void)
 {
     ESP_LOGI(TAG, "Connecting WiFi for telemetry...");
 
-    if (wifi_manager_connect_blocking(MY_WIFI_SSID, MY_WIFI_PASS, 15000))
+    if (wifi_manager_connect_blocking(s_app_cfg.wifi_ssid, s_app_cfg.wifi_pass, 15000))
     {
         ESP_LOGI(TAG, "WiFi connected for telemetry");
 
-        /*
-         * Wi-Fi 连上后同步真实时间。
-         * NTP 失败也没关系，SD 卡仍然会记录 boot_id + time_ms。
-         */
         esp_err_t ret = pet_time_sync_ntp(10000);
         if (ret == ESP_OK)
         {
@@ -93,8 +90,11 @@ static void ota_button_cb(gpio_num_t gpio, uint32_t level)
 //==============================
 // 宠物行为监测启动
 //==============================
-static void start_pet_monitor(bool enable_http_upload)
+static void start_pet_monitor(bool wifi_ok)
 {
+    bool enable_json = wifi_ok && s_app_cfg.enable_json_upload;
+    bool enable_file = wifi_ok && s_app_cfg.enable_file_upload;
+
     pet_collar_monitor_config_t cfg = {
         .bus = hwinit_get_i2c_bus(),
         .qmi8658a_addr = QMI8658A_I2C_ADDR_LOW,
@@ -103,14 +103,19 @@ static void start_pet_monitor(bool enable_http_upload)
         .task_priority = 5,
         .enable_gyro_calibration = true,
 
-        .enable_http_upload = enable_http_upload,
-        .http_url = PET_HTTP_URL,
+        .enable_http_upload = enable_json,
+        .http_url = s_app_cfg.pet_http_url,
         .http_timeout_ms = 2000,
 
-        .enable_file_upload = enable_http_upload,
-        .file_upload_url = PET_FILE_UPLOAD_URL,
-        .file_upload_scan_interval_ms = 60000,
+        .enable_file_upload = enable_file,
+        .file_upload_url = s_app_cfg.pet_file_upload_url,
+        .file_upload_scan_interval_ms = s_app_cfg.file_upload_scan_ms,
     };
+
+    ESP_LOGI(TAG,
+             "upload config: json=%d, file=%d",
+             enable_json ? 1 : 0,
+             enable_file ? 1 : 0);
 
     esp_err_t ret = pet_collar_monitor_start(&cfg);
     if (ret != ESP_OK)
@@ -134,6 +139,14 @@ void app_main(void)
     ESP_LOGI(TAG, "hardware init done");
 
     pet_time_init();
+
+    esp_err_t cfg_ret = pet_config_load_or_create(&s_app_cfg);
+    if (cfg_ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "pet config load failed: %s, use defaults", esp_err_to_name(cfg_ret));
+        pet_config_set_defaults(&s_app_cfg);
+    }
+    pet_config_print(&s_app_cfg);
 
     bool wifi_ok = start_wifi_for_telemetry();
 
