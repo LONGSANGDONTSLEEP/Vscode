@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 /**
- * @brief 初始化硬件外设：电源保持、GPIO、I2C、LED。
+ * @brief 初始化硬件外设：电源保持、GPIO、I2C、SD 卡、LED。
  */
 void hw_init(void);
 

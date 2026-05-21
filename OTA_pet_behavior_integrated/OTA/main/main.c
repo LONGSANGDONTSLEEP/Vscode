@@ -6,6 +6,7 @@
 #include "pet_collar_monitor.h"
 #include "qmi8658a.h"
 #include "wifi_manager.h"
+#include "pet_time.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -23,6 +24,7 @@
 //==============================
 #define OTA_BUTTON_GPIO GPIO_NUM_0
 #define OTA_URL "http://192.168.1.12:8070/OTA.bin" // 本地测试：python -m http.server 8070
+#define PET_HTTP_URL "http://192.168.1.12:8080/pet"
 
 static const char *TAG = "SYS";
 
@@ -43,6 +45,35 @@ static void trigger_ota(void)
     ota_update_start_bg(OTA_URL, NULL);
 }
 
+static bool start_wifi_for_telemetry(void)
+{
+    ESP_LOGI(TAG, "Connecting WiFi for telemetry...");
+
+    if (wifi_manager_connect_blocking(MY_WIFI_SSID, MY_WIFI_PASS, 15000))
+    {
+        ESP_LOGI(TAG, "WiFi connected for telemetry");
+
+        /*
+         * Wi-Fi 连上后同步真实时间。
+         * NTP 失败也没关系，SD 卡仍然会记录 boot_id + time_ms。
+         */
+        esp_err_t ret = pet_time_sync_ntp(10000);
+        if (ret == ESP_OK)
+        {
+            ESP_LOGI(TAG, "NTP time sync success");
+        }
+        else
+        {
+            ESP_LOGW(TAG, "NTP time sync failed: %s", esp_err_to_name(ret));
+        }
+
+        return true;
+    }
+
+    ESP_LOGW(TAG, "WiFi connect failed, telemetry will be unavailable");
+    return false;
+}
+
 //==============================
 // OTA 按键回调
 //==============================
@@ -61,15 +92,19 @@ static void ota_button_cb(gpio_num_t gpio, uint32_t level)
 //==============================
 // 宠物行为监测启动
 //==============================
-static void start_pet_monitor(void)
+static void start_pet_monitor(bool enable_http_upload)
 {
     pet_collar_monitor_config_t cfg = {
         .bus = hwinit_get_i2c_bus(),
-        .qmi8658a_addr = QMI8658A_I2C_ADDR_LOW, // 你的日志中 QMI8658A 是 0x6B
-        .sample_period_ms = 20,                 // 50Hz 行为识别
+        .qmi8658a_addr = QMI8658A_I2C_ADDR_LOW,
+        .sample_period_ms = 20,
         .task_stack_size = 4096,
         .task_priority = 5,
         .enable_gyro_calibration = true,
+
+        .enable_http_upload = enable_http_upload,
+        .http_url = PET_HTTP_URL,
+        .http_timeout_ms = 2000,
     };
 
     esp_err_t ret = pet_collar_monitor_start(&cfg);
@@ -93,7 +128,11 @@ void app_main(void)
     hw_init();
     ESP_LOGI(TAG, "hardware init done");
 
-    start_pet_monitor();
+    pet_time_init();
+
+    bool wifi_ok = start_wifi_for_telemetry();
+
+    start_pet_monitor(wifi_ok);
 
     ESP_LOGI(TAG, "Bluetooth OTA disabled");
     ESP_LOGI(TAG, "Use BOOT key for WiFi OTA");
