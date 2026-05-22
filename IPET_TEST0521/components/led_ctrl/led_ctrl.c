@@ -120,9 +120,9 @@ static void led_blink_task(void *arg)
     while (1) {
         if (on) {
             // 打开第一颗 LED，使用中等亮度的蓝色（可按需修改）
-            s_led_data[0] = 50;  // G
-            s_led_data[1] = 0;   // R
-            s_led_data[2] = 100; // B
+            s_led_data[0] = 0;  // G
+            s_led_data[1] = 100;   // R
+            s_led_data[2] = 0; // B
         } else {
             // 关闭第一颗 LED
             s_led_data[0] = 0;

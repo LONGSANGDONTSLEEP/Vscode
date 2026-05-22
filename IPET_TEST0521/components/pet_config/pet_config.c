@@ -120,9 +120,15 @@ void pet_config_set_defaults(pet_config_t *cfg)
              sizeof(cfg->pet_file_upload_url),
              "http://192.168.1.12:8080/upload");
 
+    copy_str(cfg->ota_command_url,
+             sizeof(cfg->ota_command_url),
+             "http://192.168.1.12:8080/ota_cmd");
+
     cfg->enable_json_upload = true;
     cfg->enable_file_upload = true;
+    cfg->enable_remote_ota = true;
     cfg->file_upload_scan_ms = 60000;
+    cfg->ota_command_poll_ms = 5000;
 }
 
 static esp_err_t write_default_config_file(const char *path, const pet_config_t *cfg)
@@ -143,11 +149,14 @@ static esp_err_t write_default_config_file(const char *path, const pet_config_t 
 
     fprintf(f, "PET_HTTP_URL=%s\n", cfg->pet_http_url);
     fprintf(f, "PET_FILE_UPLOAD_URL=%s\n", cfg->pet_file_upload_url);
+    fprintf(f, "OTA_COMMAND_URL=%s\n", cfg->ota_command_url);
     fprintf(f, "\n");
 
     fprintf(f, "ENABLE_JSON_UPLOAD=%d\n", cfg->enable_json_upload ? 1 : 0);
     fprintf(f, "ENABLE_FILE_UPLOAD=%d\n", cfg->enable_file_upload ? 1 : 0);
+    fprintf(f, "ENABLE_REMOTE_OTA=%d\n", cfg->enable_remote_ota ? 1 : 0);
     fprintf(f, "FILE_UPLOAD_SCAN_MS=%lu\n", (unsigned long)cfg->file_upload_scan_ms);
+    fprintf(f, "OTA_COMMAND_POLL_MS=%lu\n", (unsigned long)cfg->ota_command_poll_ms);
 
     fclose(f);
 
@@ -169,12 +178,18 @@ static void apply_key_value(pet_config_t *cfg, const char *key, const char *valu
         copy_str(cfg->pet_http_url, sizeof(cfg->pet_http_url), value);
     } else if (str_eq_ignore_case(key, "PET_FILE_UPLOAD_URL")) {
         copy_str(cfg->pet_file_upload_url, sizeof(cfg->pet_file_upload_url), value);
+    } else if (str_eq_ignore_case(key, "OTA_COMMAND_URL")) {
+        copy_str(cfg->ota_command_url, sizeof(cfg->ota_command_url), value);
     } else if (str_eq_ignore_case(key, "ENABLE_JSON_UPLOAD")) {
         cfg->enable_json_upload = parse_bool_value(value, cfg->enable_json_upload);
     } else if (str_eq_ignore_case(key, "ENABLE_FILE_UPLOAD")) {
         cfg->enable_file_upload = parse_bool_value(value, cfg->enable_file_upload);
+    } else if (str_eq_ignore_case(key, "ENABLE_REMOTE_OTA")) {
+        cfg->enable_remote_ota = parse_bool_value(value, cfg->enable_remote_ota);
     } else if (str_eq_ignore_case(key, "FILE_UPLOAD_SCAN_MS")) {
         cfg->file_upload_scan_ms = parse_u32_value(value, cfg->file_upload_scan_ms);
+    } else if (str_eq_ignore_case(key, "OTA_COMMAND_POLL_MS")) {
+        cfg->ota_command_poll_ms = parse_u32_value(value, cfg->ota_command_poll_ms);
     } else {
         ESP_LOGW(TAG, "unknown config key: %s", key);
     }
@@ -261,7 +276,10 @@ void pet_config_print(const pet_config_t *cfg)
     ESP_LOGI(TAG, "wifi_pass=%s", cfg->wifi_pass);
     ESP_LOGI(TAG, "pet_http_url=%s", cfg->pet_http_url);
     ESP_LOGI(TAG, "pet_file_upload_url=%s", cfg->pet_file_upload_url);
+    ESP_LOGI(TAG, "ota_command_url=%s", cfg->ota_command_url);
     ESP_LOGI(TAG, "enable_json_upload=%d", cfg->enable_json_upload ? 1 : 0);
     ESP_LOGI(TAG, "enable_file_upload=%d", cfg->enable_file_upload ? 1 : 0);
+    ESP_LOGI(TAG, "enable_remote_ota=%d", cfg->enable_remote_ota ? 1 : 0);
     ESP_LOGI(TAG, "file_upload_scan_ms=%lu", (unsigned long)cfg->file_upload_scan_ms);
+    ESP_LOGI(TAG, "ota_command_poll_ms=%lu", (unsigned long)cfg->ota_command_poll_ms);
 }

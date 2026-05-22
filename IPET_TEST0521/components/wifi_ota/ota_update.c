@@ -1,5 +1,6 @@
 #include "ota_update.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_app_desc.h"
@@ -9,6 +10,8 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "ota_update";
 
@@ -39,20 +42,51 @@ void ota_update_print_app_info(void)
 
 /* --- 简化接口实现：在后台任务中启动 OTA，并在完成后根据配置重启 --- */
 
+typedef struct {
+    char *url;
+    char *cert_pem;
+} ota_bg_args_t;
+
+static char *ota_strdup_safe(const char *s)
+{
+    if (!s) {
+        return NULL;
+    }
+
+    size_t n = strlen(s) + 1;
+    char *copy = malloc(n);
+    if (!copy) {
+        return NULL;
+    }
+
+    memcpy(copy, s, n);
+    return copy;
+}
+
 static void ota_bg_task(void *arg)
 {
-    ota_update_config_t cfg = {0};
-    const char **pargs = (const char **)arg;
-    cfg.url = pargs[0];
-    cfg.cert_pem = pargs[1];
-    cfg.timeout_ms = 10000;
-    cfg.skip_cert_common_name_check = true; // 简化：开发时允许，生产请改为 false
-    cfg.reboot_after_success = true;
-    cfg.callback = NULL;
+    ota_bg_args_t *args = (ota_bg_args_t *)arg;
+    if (!args || !args->url) {
+        free(args);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ota_update_config_t cfg = {
+        .url = args->url,
+        .cert_pem = args->cert_pem,
+        .timeout_ms = 10000,
+        .skip_cert_common_name_check = true, // 简化：开发时允许，生产请改为 false
+        .reboot_after_success = true,
+        .callback = NULL,
+        .user_ctx = NULL,
+    };
 
     ota_update_start(&cfg);
 
-    free(arg);
+    free(args->url);
+    free(args->cert_pem);
+    free(args);
     vTaskDelete(NULL);
 }
 
@@ -63,18 +97,29 @@ void ota_update_start_bg(const char *url, const char *cert_pem)
         return;
     }
 
-    const char **pargs = malloc(sizeof(const char *) * 2);
-    if (!pargs) {
+    ota_bg_args_t *args = calloc(1, sizeof(*args));
+    if (!args) {
         ESP_LOGE(TAG, "ota_update_start_bg: alloc failed");
         return;
     }
-    pargs[0] = url;
-    pargs[1] = cert_pem;
 
-    BaseType_t ok = xTaskCreate(ota_bg_task, "ota_bg", 4096, pargs, tskIDLE_PRIORITY + 5, NULL);
+    args->url = ota_strdup_safe(url);
+    args->cert_pem = ota_strdup_safe(cert_pem);
+
+    if (!args->url || (cert_pem && !args->cert_pem)) {
+        ESP_LOGE(TAG, "ota_update_start_bg: string alloc failed");
+        free(args->url);
+        free(args->cert_pem);
+        free(args);
+        return;
+    }
+
+    BaseType_t ok = xTaskCreate(ota_bg_task, "ota_bg", 8192, args, tskIDLE_PRIORITY + 5, NULL);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "ota_update_start_bg: create task failed");
-        free(pargs);
+        free(args->url);
+        free(args->cert_pem);
+        free(args);
     }
 }
 

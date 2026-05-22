@@ -1,9 +1,15 @@
 #include "pet_app.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_http_client.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "gpio_drv.h"
@@ -19,7 +25,11 @@
 #define TAG "PET_APP"
 
 #define PET_APP_OTA_BUTTON_GPIO GPIO_NUM_0
-#define PET_APP_OTA_URL "http://192.168.1.12:8070/OTA.bin"
+#define PET_APP_REMOTE_OTA_STACK_SIZE 6144U
+#define PET_APP_REMOTE_OTA_TASK_PRIORITY 3U
+#define PET_APP_OTA_HTTP_TIMEOUT_MS 3000U
+#define PET_APP_OTA_URL_MAX_LEN 256U
+#define PET_APP_OTA_ID_MAX_LEN 64U
 
 #define PET_APP_WIFI_TIMEOUT_MS 15000U
 #define PET_APP_NTP_TIMEOUT_MS 10000U
@@ -33,7 +43,16 @@
 
 static pet_config_t s_app_cfg;
 static TaskHandle_t s_heartbeat_task;
+static TaskHandle_t s_remote_ota_task;
+static SemaphoreHandle_t s_ota_lock;
+static volatile bool s_ota_in_progress;
 static bool s_started;
+static char s_last_ota_id[PET_APP_OTA_ID_MAX_LEN];
+
+typedef struct {
+    char id[PET_APP_OTA_ID_MAX_LEN];
+    char url[PET_APP_OTA_URL_MAX_LEN];
+} pet_app_ota_job_t;
 
 static void pet_app_print_stack(const char *tag)
 {
@@ -65,9 +84,260 @@ static bool pet_app_connect_wifi_for_telemetry(void)
     return true;
 }
 
+static void copy_json_string_value(const char *json,
+                                   const char *key,
+                                   char *out,
+                                   size_t out_size)
+{
+    if (!json || !key || !out || out_size == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+    const char *p = strstr(json, pattern);
+    if (!p) {
+        return;
+    }
+
+    p = strchr(p + strlen(pattern), ':');
+    if (!p) {
+        return;
+    }
+
+    p++;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+
+    if (*p != '\"') {
+        return;
+    }
+    p++;
+
+    size_t n = 0;
+    while (*p && *p != '\"' && n + 1 < out_size) {
+        out[n++] = *p++;
+    }
+    out[n] = '\0';
+}
+
+static bool json_bool_or_int_true(const char *json, const char *key)
+{
+    if (!json || !key) {
+        return false;
+    }
+
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+    const char *p = strstr(json, pattern);
+    if (!p) {
+        return false;
+    }
+
+    p = strchr(p + strlen(pattern), ':');
+    if (!p) {
+        return false;
+    }
+
+    p++;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+
+    return (*p == '1') || (strncmp(p, "true", 4) == 0) || (strncmp(p, "TRUE", 4) == 0);
+}
+
+static esp_err_t pet_app_get_ota_command(char *id,
+                                         size_t id_size,
+                                         char *url,
+                                         size_t url_size)
+{
+    if (!id || !url || id_size == 0 || url_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    id[0] = '\0';
+    url[0] = '\0';
+
+    esp_http_client_config_t config = {
+        .url = s_app_cfg.ota_command_url,
+        .timeout_ms = PET_APP_OTA_HTTP_TIMEOUT_MS,
+        .method = HTTP_METHOD_GET,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGW(TAG, "remote OTA: http client init failed");
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = esp_http_client_open(client, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "remote OTA: command open failed: %s", esp_err_to_name(ret));
+        esp_http_client_cleanup(client);
+        return ret;
+    }
+
+    int content_length = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    if (status < 200 || status >= 300) {
+        ESP_LOGW(TAG, "remote OTA: command HTTP status=%d", status);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+
+    char body[384];
+    int total = 0;
+    while (total < (int)sizeof(body) - 1) {
+        int r = esp_http_client_read(client, body + total, sizeof(body) - 1 - total);
+        if (r < 0) {
+            ESP_LOGW(TAG, "remote OTA: command read failed: %d", r);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return ESP_FAIL;
+        }
+        if (r == 0) {
+            break;
+        }
+        total += r;
+        if (content_length > 0 && total >= content_length) {
+            break;
+        }
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (total <= 0) {
+        return ESP_OK;
+    }
+
+    body[total] = '\0';
+
+    if (!json_bool_or_int_true(body, "ota")) {
+        return ESP_OK;
+    }
+
+    copy_json_string_value(body, "id", id, id_size);
+    copy_json_string_value(body, "url", url, url_size);
+
+    if (url[0] == '\0') {
+        ESP_LOGW(TAG, "remote OTA: ota=1 but url is empty, body=%s", body);
+        return ESP_OK;
+    }
+
+    if (id[0] == '\0') {
+        snprintf(id, id_size, "no-id");
+    }
+
+    return ESP_OK;
+}
+
+static void pet_app_ota_job_task(void *arg)
+{
+    pet_app_ota_job_t *job = (pet_app_ota_job_t *)arg;
+    if (!job) {
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGW(TAG, "OTA task running: id=%s url=%s", job->id, job->url);
+
+    ota_update_config_t cfg = {
+        .url = job->url,
+        .cert_pem = NULL,
+        .timeout_ms = 10000,
+        .skip_cert_common_name_check = true,
+        .reboot_after_success = true,
+        .callback = NULL,
+        .user_ctx = NULL,
+    };
+
+    esp_err_t ret = ota_update_start(&cfg);
+
+    /*
+     * OTA 成功时 ota_update_start() 会重启设备，一般不会走到这里。
+     * 如果走到这里，说明 OTA 失败或没有自动重启，需要允许之后重新触发。
+     */
+    ESP_LOGW(TAG, "OTA task finished without reboot, ret=%s", esp_err_to_name(ret));
+
+    if (s_ota_lock && xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        s_ota_in_progress = false;
+        xSemaphoreGive(s_ota_lock);
+    } else {
+        s_ota_in_progress = false;
+    }
+
+    free(job);
+    vTaskDelete(NULL);
+}
+
+static void pet_app_start_ota_url(const char *url, const char *id)
+{
+    if (!url || url[0] == '\0') {
+        return;
+    }
+
+    if (s_ota_lock && xSemaphoreTake(s_ota_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "OTA lock busy, ignore command");
+        return;
+    }
+
+    if (s_ota_in_progress) {
+        ESP_LOGW(TAG, "OTA already in progress, ignore command id=%s", id ? id : "");
+        if (s_ota_lock) {
+            xSemaphoreGive(s_ota_lock);
+        }
+        return;
+    }
+
+    s_ota_in_progress = true;
+
+    if (id && id[0] != '\0') {
+        snprintf(s_last_ota_id, sizeof(s_last_ota_id), "%s", id);
+    }
+
+    if (s_ota_lock) {
+        xSemaphoreGive(s_ota_lock);
+    }
+
+    pet_app_ota_job_t *job = calloc(1, sizeof(*job));
+    if (!job) {
+        ESP_LOGE(TAG, "OTA job alloc failed");
+        s_ota_in_progress = false;
+        return;
+    }
+
+    snprintf(job->url, sizeof(job->url), "%s", url);
+    snprintf(job->id, sizeof(job->id), "%s", id ? id : "");
+
+    ESP_LOGW(TAG, "REMOTE OTA START: id=%s url=%s", job->id, job->url);
+
+    BaseType_t ok = xTaskCreate(pet_app_ota_job_task,
+                                "ota_job",
+                                8192,
+                                job,
+                                PET_APP_REMOTE_OTA_TASK_PRIORITY + 2,
+                                NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "OTA job task create failed");
+        free(job);
+        s_ota_in_progress = false;
+    }
+}
+
 static void pet_app_trigger_ota(void)
 {
-    ESP_LOGI(TAG, "trigger OTA: %s", PET_APP_OTA_URL);
+    char id[PET_APP_OTA_ID_MAX_LEN];
+    char url[PET_APP_OTA_URL_MAX_LEN];
+
+    ESP_LOGI(TAG, "manual OTA button pressed, checking command url: %s", s_app_cfg.ota_command_url);
 
     if (!wifi_manager_connect_blocking(s_app_cfg.wifi_ssid,
                                        s_app_cfg.wifi_pass,
@@ -76,7 +346,11 @@ static void pet_app_trigger_ota(void)
         return;
     }
 
-    ota_update_start_bg(PET_APP_OTA_URL, NULL);
+    if (pet_app_get_ota_command(id, sizeof(id), url, sizeof(url)) == ESP_OK && url[0] != '\0') {
+        pet_app_start_ota_url(url, id);
+    } else {
+        ESP_LOGW(TAG, "manual OTA: no OTA command available");
+    }
 }
 
 static void pet_app_ota_button_cb(gpio_num_t gpio, uint32_t level)
@@ -99,6 +373,82 @@ static esp_err_t pet_app_register_ota_button(void)
     }
 
     ESP_LOGI(TAG, "OTA button registered on GPIO%d", PET_APP_OTA_BUTTON_GPIO);
+    return ESP_OK;
+}
+
+static void pet_app_remote_ota_task(void *arg)
+{
+    (void)arg;
+
+    char id[PET_APP_OTA_ID_MAX_LEN];
+    char url[PET_APP_OTA_URL_MAX_LEN];
+
+    uint32_t poll_ms = s_app_cfg.ota_command_poll_ms;
+    if (poll_ms < 3000) {
+        poll_ms = 3000;
+    }
+
+    ESP_LOGI(TAG,
+             "remote OTA command polling started: url=%s, interval=%lu ms",
+             s_app_cfg.ota_command_url,
+             (unsigned long)poll_ms);
+
+    while (1) {
+        if (!s_ota_in_progress) {
+            esp_err_t ret = pet_app_get_ota_command(id, sizeof(id), url, sizeof(url));
+            if (ret == ESP_OK && url[0] != '\0') {
+                if (id[0] != '\0' && strcmp(id, s_last_ota_id) == 0) {
+                    ESP_LOGI(TAG, "remote OTA command already handled: id=%s", id);
+                } else {
+                    pet_app_start_ota_url(url, id);
+                }
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+    }
+}
+
+static esp_err_t pet_app_start_remote_ota(bool wifi_ok)
+{
+    if (!wifi_ok) {
+        ESP_LOGW(TAG, "remote OTA disabled because WiFi is not connected");
+        return ESP_OK;
+    }
+
+    if (!s_app_cfg.enable_remote_ota) {
+        ESP_LOGI(TAG, "remote OTA disabled by config");
+        return ESP_OK;
+    }
+
+    if (s_app_cfg.ota_command_url[0] == '\0') {
+        ESP_LOGW(TAG, "remote OTA disabled: empty OTA_COMMAND_URL");
+        return ESP_OK;
+    }
+
+    if (!s_ota_lock) {
+        s_ota_lock = xSemaphoreCreateMutex();
+        if (!s_ota_lock) {
+            ESP_LOGE(TAG, "remote OTA mutex create failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    if (s_remote_ota_task) {
+        return ESP_OK;
+    }
+
+    BaseType_t ok = xTaskCreate(pet_app_remote_ota_task,
+                                "remote_ota",
+                                PET_APP_REMOTE_OTA_STACK_SIZE,
+                                NULL,
+                                PET_APP_REMOTE_OTA_TASK_PRIORITY,
+                                &s_remote_ota_task);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "remote OTA task create failed");
+        return ESP_FAIL;
+    }
+
     return ESP_OK;
 }
 
@@ -203,6 +553,7 @@ esp_err_t pet_app_start(void)
     bool wifi_ok = pet_app_connect_wifi_for_telemetry();
 
     esp_err_t monitor_ret = pet_app_start_monitor(wifi_ok);
+    esp_err_t remote_ota_ret = pet_app_start_remote_ota(wifi_ok);
     esp_err_t button_ret = pet_app_register_ota_button();
     esp_err_t heartbeat_ret = pet_app_start_heartbeat();
 
@@ -213,6 +564,9 @@ esp_err_t pet_app_start(void)
 
     if (monitor_ret != ESP_OK) {
         return monitor_ret;
+    }
+    if (remote_ota_ret != ESP_OK) {
+        return remote_ota_ret;
     }
     if (button_ret != ESP_OK) {
         return button_ret;

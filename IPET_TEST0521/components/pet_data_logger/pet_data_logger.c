@@ -251,7 +251,7 @@ static esp_err_t ensure_current_headers(void)
 
     ret = ensure_csv_header(
         s_state_path,
-        "boot_id,time_ms,epoch_ms,time_valid,time_str,state,raw_state,candidate,event,acc,gyro,acc_mean,acc_std,gyro_mean,gyro_std,acc_axis_std,gyro_axis_std,acc_delta_mean,gyro_delta_mean,acc_range,gyro_range,posture_std,activity_score,rest_score,rhythm_score,irregular_score,burst_score,confidence,history_count,vote_rest,vote_walk,vote_trot,vote_run,vote_play,vote_passive,pitch,roll,state_duration_ms,rest_like_ms,algo_version"
+        "boot_id,time_ms,epoch_ms,time_valid,time_str,state,raw_state,candidate,event,acc,gyro,acc_mean,acc_std,gyro_mean,gyro_std,acc_axis_std,gyro_axis_std,acc_delta_mean,gyro_delta_mean,acc_range,gyro_range,posture_std,activity_score,rest_score,rhythm_score,irregular_score,burst_score,run_score,play_score,confidence,history_count,vote_rest,vote_walk,vote_trot,vote_run,vote_play,vote_passive,pitch,roll,state_duration_ms,rest_like_ms,algo_version"
     );
     if (ret != ESP_OK) {
         return ret;
@@ -259,7 +259,7 @@ static esp_err_t ensure_current_headers(void)
 
     ret = ensure_csv_header(
         s_event_path,
-        "boot_id,time_ms,epoch_ms,time_valid,time_str,event,state,raw_state,candidate,acc,gyro,acc_mean,acc_std,gyro_mean,gyro_std,acc_axis_std,gyro_axis_std,acc_delta_mean,gyro_delta_mean,acc_range,gyro_range,posture_std,activity_score,rest_score,rhythm_score,irregular_score,burst_score,confidence,history_count,vote_rest,vote_walk,vote_trot,vote_run,vote_play,vote_passive,pitch,roll,state_duration_ms,rest_like_ms,algo_version"
+        "boot_id,time_ms,epoch_ms,time_valid,time_str,event,state,raw_state,candidate,acc,gyro,acc_mean,acc_std,gyro_mean,gyro_std,acc_axis_std,gyro_axis_std,acc_delta_mean,gyro_delta_mean,acc_range,gyro_range,posture_std,activity_score,rest_score,rhythm_score,irregular_score,burst_score,run_score,play_score,confidence,history_count,vote_rest,vote_walk,vote_trot,vote_run,vote_play,vote_passive,pitch,roll,state_duration_ms,rest_like_ms,algo_version"
     );
     if (ret != ESP_OK) {
         return ret;
@@ -393,7 +393,7 @@ esp_err_t pet_data_logger_write_state(uint32_t now_ms, const pet_behavior_result
     }
 
     fprintf(f,
-            "%08lx,%llu,%lld,%d,\"%s\",%s,%s,%s,%s,%.3f,%.2f,%.3f,%.3f,%.2f,%.2f,%.3f,%.2f,%.4f,%.2f,%.3f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%u,%u,%u,%u,%u,%u,%.1f,%.1f,%lu,%lu,%s\n",
+            "%08lx,%llu,%lld,%d,\"%s\",%s,%s,%s,%s,%.3f,%.2f,%.3f,%.3f,%.2f,%.2f,%.3f,%.2f,%.4f,%.2f,%.3f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%u,%u,%u,%u,%u,%u,%.1f,%.1f,%lu,%lu,%s\n",
             (unsigned long)ts.boot_id,
             (unsigned long long)ts.time_ms,
             (long long)ts.epoch_ms,
@@ -421,6 +421,8 @@ esp_err_t pet_data_logger_write_state(uint32_t now_ms, const pet_behavior_result
             result->rhythm_score,
             result->irregular_score,
             result->burst_score,
+            result->run_score,
+            result->play_score,
             result->confidence,
             (unsigned)result->history_count,
             (unsigned)result->vote_rest,
@@ -469,7 +471,7 @@ esp_err_t pet_data_logger_write_event(uint32_t now_ms, const pet_behavior_result
     }
 
     fprintf(f,
-            "%08lx,%llu,%lld,%d,\"%s\",%s,%s,%s,%s,%.3f,%.2f,%.3f,%.3f,%.2f,%.2f,%.3f,%.2f,%.4f,%.2f,%.3f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%u,%u,%u,%u,%u,%u,%.1f,%.1f,%lu,%lu,%s\n",
+            "%08lx,%llu,%lld,%d,\"%s\",%s,%s,%s,%s,%.3f,%.2f,%.3f,%.3f,%.2f,%.2f,%.3f,%.2f,%.4f,%.2f,%.3f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%u,%u,%u,%u,%u,%u,%.1f,%.1f,%lu,%lu,%s\n",
             (unsigned long)ts.boot_id,
             (unsigned long long)ts.time_ms,
             (long long)ts.epoch_ms,
@@ -497,6 +499,8 @@ esp_err_t pet_data_logger_write_event(uint32_t now_ms, const pet_behavior_result
             result->rhythm_score,
             result->irregular_score,
             result->burst_score,
+            result->run_score,
+            result->play_score,
             result->confidence,
             (unsigned)result->history_count,
             (unsigned)result->vote_rest,

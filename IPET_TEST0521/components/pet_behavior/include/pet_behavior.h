@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define PET_BEHAVIOR_ALGO_VERSION "v4.0.0-stable-user-state"
+#define PET_BEHAVIOR_ALGO_VERSION "v6.0.0-run-stage"
 #define PET_BEHAVIOR_HISTORY_MAX 8
 
 typedef enum {
@@ -53,7 +53,8 @@ typedef struct {
      * false: 默认只稳定显示 REST / WALK / SLEEP / NOT_WORN，减少 WALK 误显示 PLAY/RUN。
      * true : 允许最终 state 显示 TROT / RUN / PLAY，适合后期有更多人工标签后再打开。
      */
-    bool enable_fine_states;
+    bool enable_fine_states;      // true: 最终 state 允许显示 TROT/RUN/PLAY
+    bool enable_run_state;        // v6: true 时即使 enable_fine_states=false，也允许最终 state 显示 RUN
     bool passive_motion_as_rest;    // true 时 PASSIVE_MOTION 显示成 REST，但 raw_state 仍保留
 
     // 静止/运动阈值。单位：g 或 dps。
@@ -63,6 +64,21 @@ typedef struct {
     float rest_gyro_mean_th;
     float rest_gyro_std_th;
     float rest_posture_std_th;
+
+    /*
+     * 未佩戴/桌面静置阈值。
+     * 这组阈值比 REST 更严格：必须几乎完全没有加速度、角速度和姿态波动，
+     * 并且持续一段时间后才判 NOT_WORN。
+     * 如果只是长时间安静但仍有轻微微动，则更像 SLEEP。
+     */
+    float not_worn_acc_std_th;
+    float not_worn_acc_range_th;
+    float not_worn_acc_delta_th;
+    float not_worn_gyro_mean_th;
+    float not_worn_gyro_std_th;
+    float not_worn_gyro_range_th;
+    float not_worn_gyro_delta_th;
+    float not_worn_posture_std_th;
 
     float walk_acc_std_th;
     float walk_acc_axis_std_th;
@@ -97,6 +113,7 @@ typedef struct {
     float scratch_acc_std_min;
 
     // 长时间判断
+    // not_worn_after_rest_ms 基于“超静止”计时；sleep_after_rest_ms 基于普通 REST 计时。
     uint32_t sleep_after_rest_ms;
     uint32_t not_worn_after_rest_ms;
 } pet_behavior_config_t;
@@ -131,6 +148,8 @@ typedef struct {
     float rhythm_score;             // 0~100，节律/稳定运动倾向。当前为轻量启发式，不是频谱算法
     float irregular_score;          // 0~100，不规则/乱动倾向
     float burst_score;              // 0~100，短时冲击/大幅旋转倾向
+    float run_score;                // 0~100，跑步倾向。v6 用于调 WALK/RUN 边界
+    float play_score;               // 0~100，玩耍倾向。后续用于 PLAY 识别
     float confidence;               // 0~100，最终状态置信度
 
     uint8_t history_count;
