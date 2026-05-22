@@ -27,6 +27,10 @@ static bool s_logger_ready;
 static bool s_telemetry_ready;
 static bool s_file_uploader_ready;
 
+static volatile bool s_recording_mode;
+static volatile bool s_raw_sample_log;
+static volatile uint32_t s_recording_sample_period_ms = 5;
+
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
@@ -48,6 +52,9 @@ static void pet_monitor_task(void *arg)
     {
         s_logger_ready = true;
         ESP_LOGI(TAG, "pet data logger ready");
+        if (s_recording_mode && s_raw_sample_log) {
+            pet_data_logger_set_raw_enabled(true);
+        }
     }
     else
     {
@@ -155,6 +162,16 @@ static void pet_monitor_task(void *arg)
         {
             uint32_t t = now_ms();
 
+            if (s_recording_mode && s_raw_sample_log && s_logger_ready)
+            {
+                const pet_behavior_result_t *raw_result = s_have_result ? &s_last_result : NULL;
+                esp_err_t raw_ret = pet_data_logger_write_raw_sample(t, &sample, raw_result);
+                if (raw_ret != ESP_OK && raw_ret != ESP_ERR_INVALID_STATE)
+                {
+                    ESP_LOGW(TAG, "write raw IMU log failed: %s", esp_err_to_name(raw_ret));
+                }
+            }
+
             bool changed = pet_behavior_update(s_behavior, &sample, t, &result);
             s_last_result = result;
             s_have_result = true;
@@ -167,7 +184,7 @@ static void pet_monitor_task(void *arg)
             {
                 bool state_changed = (result.state != last_print_state);
                 bool time_to_report = (t - last_user_report_ms) >= PET_TERMINAL_STATE_REPORT_MS;
-                bool should_report_user_state = state_changed || time_to_report;
+                bool should_report_user_state = s_recording_mode || state_changed || time_to_report;
 
                 /*
                  * 终端只显示“用户真正需要看的当前状态”。
@@ -177,8 +194,9 @@ static void pet_monitor_task(void *arg)
                 if (should_report_user_state)
                 {
                     ESP_LOGI(TAG,
-                             "current_state=%s",
-                             pet_state_to_str(result.state));
+                             "current_state=%s%s",
+                             pet_state_to_str(result.state),
+                             s_recording_mode ? " recording=1" : "");
 
                     last_user_report_ms = t;
                     last_print_state = result.state;
@@ -224,7 +242,11 @@ static void pet_monitor_task(void *arg)
             ESP_LOGW(TAG, "QMI8658A read failed");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(s_cfg.sample_period_ms));
+        uint32_t delay_ms = s_recording_mode ? s_recording_sample_period_ms : s_cfg.sample_period_ms;
+        if (delay_ms == 0) {
+            delay_ms = 1;
+        }
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
 
@@ -330,6 +352,44 @@ esp_err_t pet_collar_monitor_start(const pet_collar_monitor_config_t *cfg)
     return ESP_OK;
 }
 
+esp_err_t pet_collar_monitor_set_recording_mode(bool enabled,
+                                                    uint32_t sample_period_ms,
+                                                    bool raw_sample_log)
+{
+    if (sample_period_ms == 0) {
+        sample_period_ms = 5;
+    }
+    if (sample_period_ms < 5) {
+        sample_period_ms = 5;
+    }
+    if (sample_period_ms > 20) {
+        sample_period_ms = 20;
+    }
+
+    s_recording_sample_period_ms = sample_period_ms;
+    s_raw_sample_log = raw_sample_log;
+    s_recording_mode = enabled;
+
+    if (s_logger_ready) {
+        esp_err_t ret = pet_data_logger_set_raw_enabled(enabled && raw_sample_log);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "set raw logger failed: %s", esp_err_to_name(ret));
+        }
+    }
+
+    ESP_LOGW(TAG,
+             "recording mode %s, sample_period=%lu ms, raw_log=%d",
+             enabled ? "ON" : "OFF",
+             (unsigned long)s_recording_sample_period_ms,
+             raw_sample_log ? 1 : 0);
+    return ESP_OK;
+}
+
+bool pet_collar_monitor_is_recording_mode(void)
+{
+    return s_recording_mode;
+}
+
 esp_err_t pet_collar_monitor_stop(void)
 {
     if (s_task)
@@ -337,6 +397,13 @@ esp_err_t pet_collar_monitor_stop(void)
         vTaskDelete(s_task);
         s_task = NULL;
     }
+
+    if (s_logger_ready) {
+        pet_data_logger_set_raw_enabled(false);
+    }
+
+    s_recording_mode = false;
+    s_raw_sample_log = false;
 
     if (s_behavior)
     {

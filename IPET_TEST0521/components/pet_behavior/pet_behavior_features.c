@@ -3,13 +3,21 @@
 bool is_ultra_static_window(const behavior_window_t *w, const pet_behavior_config_t *c)
 {
     /*
-     * 取下放桌面时的典型数据：
-     * acc_std <= 0.001g, acc_range <= 0.003g, gyro_mean < 0.9dps,
-     * gyro_std <= 0.06dps, gyro_range <= 0.31dps。
-     * 这里留出少量余量，但仍明显低于佩戴睡觉时应出现的微动。
+     * v6.1 修正：未佩戴/放地上不应依赖 acc_mean 必须接近 1g。
+     *
+     * 用户 16:35 后“放地上不动”的数据里 acc_mean/acc_norm 固定约 6.928g，
+     * 但 acc_std、acc_range、acc_delta、gyro_std、gyro_range、posture_std 几乎为 0。
+     * 这说明“绝对加速度值”可能受量程/方向/读数异常影响，不能作为 NOT_WORN 的硬条件。
+     *
+     * 所以 ultra_static 只看“长时间几乎没有变化”：
+     * - 加速度波动极低，例如 acc 只在 0.999~1.001 之间动；
+     * - 陀螺仪波动极低；
+     * - 姿态变化极低。
+     * acc_mean 只做非常宽的 sanity check，防止全 0 或明显坏数据。
      */
-    bool acc_near_1g = fabsf(w->acc_mean - 1.0f) < 0.05f;
-    return acc_near_1g &&
+    bool acc_mean_sane = w->acc_mean > 0.20f && w->acc_mean < 9.50f;
+
+    return acc_mean_sane &&
            w->acc_std <= c->not_worn_acc_std_th &&
            w->acc_range <= c->not_worn_acc_range_th &&
            w->acc_delta_mean <= c->not_worn_acc_delta_th &&

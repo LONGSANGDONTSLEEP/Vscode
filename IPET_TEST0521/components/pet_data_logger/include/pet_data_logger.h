@@ -5,6 +5,7 @@
 
 #include "esp_err.h"
 #include "pet_behavior.h"
+#include "qmi8658a.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,6 +16,17 @@ bool pet_data_logger_is_ready(void);
 
 esp_err_t pet_data_logger_write_state(uint32_t now_ms, const pet_behavior_result_t *result);
 esp_err_t pet_data_logger_write_event(uint32_t now_ms, const pet_behavior_result_t *result);
+
+/**
+ * @brief 开关高频 raw IMU 日志。
+ *
+ * 开启后会生成 Rxxxxxx.CSV，按采样周期记录 ax/gx 原始值和换算值。
+ */
+esp_err_t pet_data_logger_set_raw_enabled(bool enabled);
+bool pet_data_logger_raw_is_enabled(void);
+esp_err_t pet_data_logger_write_raw_sample(uint32_t now_ms,
+                                           const qmi8658a_sample_t *sample,
+                                           const pet_behavior_result_t *result);
 
 /**
  * @brief 获取当前测试 session 目录。

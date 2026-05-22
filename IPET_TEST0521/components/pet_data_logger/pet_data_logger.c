@@ -1,6 +1,7 @@
 #include "pet_data_logger.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -27,6 +28,10 @@ static bool s_ready = false;
 static char s_session_dir[160];
 static char s_state_path[192];
 static char s_event_path[192];
+static char s_raw_path[192];
+static FILE *s_raw_file = NULL;
+static bool s_raw_enabled = false;
+static uint64_t s_raw_last_flush_ms = 0;
 
 static uint32_t s_segment_no = 1;
 static uint64_t s_segment_start_ms = 0;
@@ -210,6 +215,7 @@ static esp_err_t build_segment_paths(uint32_t segment_no)
 {
     char state_name[16];
     char event_name[16];
+    char raw_name[16];
 
     /*
      * 8.3 文件名：
@@ -218,6 +224,7 @@ static esp_err_t build_segment_paths(uint32_t segment_no)
      */
     snprintf(state_name, sizeof(state_name), "S%06lu.CSV", (unsigned long)segment_no);
     snprintf(event_name, sizeof(event_name), "E%06lu.CSV", (unsigned long)segment_no);
+    snprintf(raw_name, sizeof(raw_name), "R%06lu.CSV", (unsigned long)segment_no);
 
     int len = snprintf(s_state_path,
                        sizeof(s_state_path),
@@ -239,8 +246,59 @@ static esp_err_t build_segment_paths(uint32_t segment_no)
         return ESP_FAIL;
     }
 
+    len = snprintf(s_raw_path,
+                   sizeof(s_raw_path),
+                   "%s/%s",
+                   s_session_dir,
+                   raw_name);
+    if (len < 0 || len >= (int)sizeof(s_raw_path)) {
+        ESP_LOGE(TAG, "raw path too long");
+        return ESP_FAIL;
+    }
+
     ESP_LOGI(TAG, "state log path: %s", s_state_path);
     ESP_LOGI(TAG, "event log path: %s", s_event_path);
+    ESP_LOGI(TAG, "raw log path: %s", s_raw_path);
+
+    return ESP_OK;
+}
+
+static void close_raw_file(void)
+{
+    if (s_raw_file) {
+        fflush(s_raw_file);
+        fclose(s_raw_file);
+        s_raw_file = NULL;
+    }
+}
+
+static esp_err_t ensure_raw_header(void)
+{
+    return ensure_csv_header(
+        s_raw_path,
+        "boot_id,time_ms,epoch_ms,time_valid,time_str,recording,state,raw_state,candidate,ax_raw,ay_raw,az_raw,gx_raw,gy_raw,gz_raw,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,acc,gyro,temp_c"
+    );
+}
+
+static esp_err_t open_raw_file_if_needed(void)
+{
+    if (!s_raw_enabled) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = ensure_raw_header();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    if (!s_raw_file) {
+        s_raw_file = fopen(s_raw_path, "a");
+        if (!s_raw_file) {
+            ESP_LOGE(TAG, "open raw log failed: %s, errno=%d", s_raw_path, errno);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "raw log opened: %s", s_raw_path);
+    }
 
     return ESP_OK;
 }
@@ -281,6 +339,8 @@ static esp_err_t rotate_if_needed(void)
         return ESP_OK;
     }
 
+    close_raw_file();
+
     s_segment_no++;
     s_segment_start_ms = now;
 
@@ -291,7 +351,16 @@ static esp_err_t rotate_if_needed(void)
         return ret;
     }
 
-    return ensure_current_headers();
+    ret = ensure_current_headers();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    if (s_raw_enabled) {
+        return open_raw_file_if_needed();
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t pet_data_logger_init(void)
@@ -354,6 +423,8 @@ esp_err_t pet_data_logger_force_rotate(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    close_raw_file();
+
     s_segment_no++;
     s_segment_start_ms = logger_now_ms();
 
@@ -364,7 +435,108 @@ esp_err_t pet_data_logger_force_rotate(void)
         return ret;
     }
 
-    return ensure_current_headers();
+    ret = ensure_current_headers();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    if (s_raw_enabled) {
+        return open_raw_file_if_needed();
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t pet_data_logger_set_raw_enabled(bool enabled)
+{
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_raw_enabled == enabled) {
+        return ESP_OK;
+    }
+
+    s_raw_enabled = enabled;
+    s_raw_last_flush_ms = 0;
+
+    if (!enabled) {
+        close_raw_file();
+        ESP_LOGI(TAG, "raw IMU logging disabled");
+        return ESP_OK;
+    }
+
+    esp_err_t ret = open_raw_file_if_needed();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "raw IMU logging enabled");
+    }
+    return ret;
+}
+
+bool pet_data_logger_raw_is_enabled(void)
+{
+    return s_raw_enabled;
+}
+
+esp_err_t pet_data_logger_write_raw_sample(uint32_t now_ms,
+                                           const qmi8658a_sample_t *sample,
+                                           const pet_behavior_result_t *result)
+{
+    (void)now_ms;
+
+    if (!s_ready || !s_raw_enabled || !sample) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = rotate_if_needed();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = open_raw_file_if_needed();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    pet_time_snapshot_t ts;
+    pet_time_get_snapshot(&ts);
+
+    float acc = sqrtf(sample->ax_g * sample->ax_g + sample->ay_g * sample->ay_g + sample->az_g * sample->az_g);
+    float gyro = sqrtf(sample->gx_dps * sample->gx_dps + sample->gy_dps * sample->gy_dps + sample->gz_dps * sample->gz_dps);
+
+    fprintf(s_raw_file,
+            "%08lx,%llu,%lld,%d,\"%s\",1,%s,%s,%s,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.2f\n",
+            (unsigned long)ts.boot_id,
+            (unsigned long long)ts.time_ms,
+            (long long)ts.epoch_ms,
+            ts.time_valid ? 1 : 0,
+            ts.time_str,
+            result ? pet_state_to_str(result->state) : "",
+            result ? pet_state_to_str(result->raw_state) : "",
+            result ? pet_state_to_str(result->candidate_state) : "",
+            (int)sample->ax_raw,
+            (int)sample->ay_raw,
+            (int)sample->az_raw,
+            (int)sample->gx_raw,
+            (int)sample->gy_raw,
+            (int)sample->gz_raw,
+            sample->ax_g,
+            sample->ay_g,
+            sample->az_g,
+            sample->gx_dps,
+            sample->gy_dps,
+            sample->gz_dps,
+            acc,
+            gyro,
+            sample->temp_c);
+
+    uint64_t now = logger_now_ms();
+    if (s_raw_last_flush_ms == 0 || (now - s_raw_last_flush_ms) >= 1000) {
+        fflush(s_raw_file);
+        s_raw_last_flush_ms = now;
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t pet_data_logger_write_state(uint32_t now_ms, const pet_behavior_result_t *result)

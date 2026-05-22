@@ -27,16 +27,28 @@ typedef struct {
      */
     char ota_command_url[PET_CONFIG_URL_MAX_LEN];
 
+    /*
+     * 远程录制命令地址。
+     * 网页点击“开始录制”后，设备轮询这个 URL，进入高频采样 + raw 日志模式。
+     */
+    char record_command_url[PET_CONFIG_URL_MAX_LEN];
+
     bool enable_json_upload;
     bool enable_file_upload;
 
     /* 是否允许通过服务器命令触发 OTA。 */
     bool enable_remote_ota;
 
+    /* 是否允许网页远程控制高频录制模式。 */
+    bool enable_remote_record;
+
     uint32_t file_upload_scan_ms;
 
     /* 远程 OTA 命令轮询间隔，建议 3000~10000ms。 */
     uint32_t ota_command_poll_ms;
+
+    /* 远程录制命令轮询间隔，录制控制建议 1000~2000ms。 */
+    uint32_t record_command_poll_ms;
 } pet_config_t;
 
 /**

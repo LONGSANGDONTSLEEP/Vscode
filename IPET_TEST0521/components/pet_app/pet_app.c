@@ -30,6 +30,10 @@
 #define PET_APP_OTA_HTTP_TIMEOUT_MS 3000U
 #define PET_APP_OTA_URL_MAX_LEN 256U
 #define PET_APP_OTA_ID_MAX_LEN 64U
+#define PET_APP_RECORD_ID_MAX_LEN 64U
+#define PET_APP_RECORD_HTTP_TIMEOUT_MS 1500U
+#define PET_APP_REMOTE_RECORD_STACK_SIZE 4096U
+#define PET_APP_REMOTE_RECORD_TASK_PRIORITY 3U
 
 #define PET_APP_WIFI_TIMEOUT_MS 15000U
 #define PET_APP_NTP_TIMEOUT_MS 10000U
@@ -44,10 +48,12 @@
 static pet_config_t s_app_cfg;
 static TaskHandle_t s_heartbeat_task;
 static TaskHandle_t s_remote_ota_task;
+static TaskHandle_t s_remote_record_task;
 static SemaphoreHandle_t s_ota_lock;
 static volatile bool s_ota_in_progress;
 static bool s_started;
 static char s_last_ota_id[PET_APP_OTA_ID_MAX_LEN];
+static char s_last_record_id[PET_APP_RECORD_ID_MAX_LEN];
 
 typedef struct {
     char id[PET_APP_OTA_ID_MAX_LEN];
@@ -150,6 +156,50 @@ static bool json_bool_or_int_true(const char *json, const char *key)
     }
 
     return (*p == '1') || (strncmp(p, "true", 4) == 0) || (strncmp(p, "TRUE", 4) == 0);
+}
+
+static bool json_has_key(const char *json, const char *key)
+{
+    if (!json || !key) {
+        return false;
+    }
+
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    return strstr(json, pattern) != NULL;
+}
+
+static uint32_t json_u32_value(const char *json, const char *key, uint32_t default_value)
+{
+    if (!json || !key) {
+        return default_value;
+    }
+
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+    const char *p = strstr(json, pattern);
+    if (!p) {
+        return default_value;
+    }
+
+    p = strchr(p + strlen(pattern), ':');
+    if (!p) {
+        return default_value;
+    }
+
+    p++;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+
+    char *end = NULL;
+    unsigned long v = strtoul(p, &end, 10);
+    if (end == p) {
+        return default_value;
+    }
+
+    return (uint32_t)v;
 }
 
 static esp_err_t pet_app_get_ota_command(char *id,
@@ -452,6 +502,170 @@ static esp_err_t pet_app_start_remote_ota(bool wifi_ok)
     return ESP_OK;
 }
 
+static esp_err_t pet_app_get_record_command(char *id,
+                                            size_t id_size,
+                                            bool *enabled,
+                                            uint32_t *sample_period_ms,
+                                            bool *raw_log)
+{
+    if (!id || id_size == 0 || !enabled || !sample_period_ms || !raw_log) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    id[0] = '\0';
+    *enabled = false;
+    *sample_period_ms = 5;
+    *raw_log = true;
+
+    esp_http_client_config_t config = {
+        .url = s_app_cfg.record_command_url,
+        .timeout_ms = PET_APP_RECORD_HTTP_TIMEOUT_MS,
+        .method = HTTP_METHOD_GET,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGW(TAG, "record cmd: http client init failed");
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = esp_http_client_open(client, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "record cmd: open failed: %s", esp_err_to_name(ret));
+        esp_http_client_cleanup(client);
+        return ret;
+    }
+
+    int content_length = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    if (status < 200 || status >= 300) {
+        ESP_LOGW(TAG, "record cmd: HTTP status=%d", status);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+
+    char body[384];
+    int total = 0;
+    while (total < (int)sizeof(body) - 1) {
+        int r = esp_http_client_read(client, body + total, sizeof(body) - 1 - total);
+        if (r < 0) {
+            ESP_LOGW(TAG, "record cmd: read failed: %d", r);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return ESP_FAIL;
+        }
+        if (r == 0) {
+            break;
+        }
+        total += r;
+        if (content_length > 0 && total >= content_length) {
+            break;
+        }
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (total <= 0) {
+        return ESP_OK;
+    }
+
+    body[total] = '\0';
+
+    if (!json_has_key(body, "record")) {
+        return ESP_OK;
+    }
+
+    copy_json_string_value(body, "id", id, id_size);
+    if (id[0] == '\0') {
+        snprintf(id, id_size, "no-id");
+    }
+
+    *enabled = json_bool_or_int_true(body, "record");
+    *sample_period_ms = json_u32_value(body, "sample_period_ms", 5);
+    *raw_log = json_has_key(body, "raw") ? json_bool_or_int_true(body, "raw") : true;
+
+    return ESP_OK;
+}
+
+static void pet_app_remote_record_task(void *arg)
+{
+    (void)arg;
+
+    char id[PET_APP_RECORD_ID_MAX_LEN];
+    bool enabled = false;
+    bool raw_log = true;
+    uint32_t sample_period_ms = 5;
+
+    uint32_t poll_ms = s_app_cfg.record_command_poll_ms;
+    if (poll_ms < 1000) {
+        poll_ms = 1000;
+    }
+
+    ESP_LOGI(TAG,
+             "remote record polling started: url=%s, interval=%lu ms",
+             s_app_cfg.record_command_url,
+             (unsigned long)poll_ms);
+
+    while (1) {
+        esp_err_t ret = pet_app_get_record_command(id,
+                                                   sizeof(id),
+                                                   &enabled,
+                                                   &sample_period_ms,
+                                                   &raw_log);
+        if (ret == ESP_OK && id[0] != '\0') {
+            if (strcmp(id, s_last_record_id) != 0) {
+                snprintf(s_last_record_id, sizeof(s_last_record_id), "%s", id);
+                ESP_LOGW(TAG,
+                         "record command: id=%s enabled=%d sample_period=%lu raw=%d",
+                         id,
+                         enabled ? 1 : 0,
+                         (unsigned long)sample_period_ms,
+                         raw_log ? 1 : 0);
+                pet_collar_monitor_set_recording_mode(enabled, sample_period_ms, raw_log);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+    }
+}
+
+static esp_err_t pet_app_start_remote_record(bool wifi_ok)
+{
+    if (!wifi_ok) {
+        ESP_LOGW(TAG, "remote record disabled because WiFi is not connected");
+        return ESP_OK;
+    }
+
+    if (!s_app_cfg.enable_remote_record) {
+        ESP_LOGI(TAG, "remote record disabled by config");
+        return ESP_OK;
+    }
+
+    if (s_app_cfg.record_command_url[0] == '\0') {
+        ESP_LOGW(TAG, "remote record disabled: empty RECORD_COMMAND_URL");
+        return ESP_OK;
+    }
+
+    if (s_remote_record_task) {
+        return ESP_OK;
+    }
+
+    BaseType_t ok = xTaskCreate(pet_app_remote_record_task,
+                                "remote_record",
+                                PET_APP_REMOTE_RECORD_STACK_SIZE,
+                                NULL,
+                                PET_APP_REMOTE_RECORD_TASK_PRIORITY,
+                                &s_remote_record_task);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "remote record task create failed");
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
 static esp_err_t pet_app_start_monitor(bool wifi_ok)
 {
     const bool enable_json = wifi_ok && s_app_cfg.enable_json_upload;
@@ -554,6 +768,7 @@ esp_err_t pet_app_start(void)
 
     esp_err_t monitor_ret = pet_app_start_monitor(wifi_ok);
     esp_err_t remote_ota_ret = pet_app_start_remote_ota(wifi_ok);
+    esp_err_t remote_record_ret = pet_app_start_remote_record(wifi_ok);
     esp_err_t button_ret = pet_app_register_ota_button();
     esp_err_t heartbeat_ret = pet_app_start_heartbeat();
 
@@ -567,6 +782,9 @@ esp_err_t pet_app_start(void)
     }
     if (remote_ota_ret != ESP_OK) {
         return remote_ota_ret;
+    }
+    if (remote_record_ret != ESP_OK) {
+        return remote_record_ret;
     }
     if (button_ret != ESP_OK) {
         return button_ret;

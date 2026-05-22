@@ -36,10 +36,12 @@ void pet_behavior_default_config(pet_behavior_config_t *cfg)
     cfg->rest_posture_std_th = 6.0f;
 
     /*
-     * 桌面静置基线来自 2026-05-22 用户测试 CSV：
-     * acc_std max≈0.001g, acc_range max≈0.003g, gyro_mean max≈0.85dps,
-     * gyro_std max≈0.06dps, gyro_range max≈0.31dps。
-     * 阈值设置为约 2~4 倍余量，用于区分“完全没震动”与“佩戴睡觉的轻微波动”。
+     * NOT_WORN 超静止阈值。
+     * 2026-05-22 桌面/地面静置数据：
+     * - 有的文件 acc≈1g；
+     * - 有的文件 acc 固定≈6.928g；
+     * 但共同点是 acc_std/range/delta 和 gyro_std/range/delta 几乎为 0。
+     * 因此 v6.1 不再要求 acc_mean 接近 1g，而是用“几乎没有变化”判未佩戴。
      */
     cfg->not_worn_acc_std_th = 0.003f;
     cfg->not_worn_acc_range_th = 0.008f;
@@ -86,11 +88,12 @@ void pet_behavior_default_config(pet_behavior_config_t *cfg)
     cfg->scratch_acc_std_min = 0.10f;
 
     /*
-     * v5：NOT_WORN 不再等普通 REST 20 分钟，而是看“超静止”持续时间。
-     * 取下放桌面一般 2 分钟内判未佩戴；佩戴睡觉需要更久且有微动。
+     * v6.2：NOT_WORN 优先级提高，并且速度更快。
+     * 只要连续“几乎完全没有变化”约 20 秒，就认为是取下/放地上。
+     * SLEEP 必须是“安静但仍有轻微波动”，不能抢超静止场景。
      */
     cfg->sleep_after_rest_ms = 5 * 60 * 1000;
-    cfg->not_worn_after_rest_ms = 2 * 60 * 1000;
+    cfg->not_worn_after_rest_ms = 20 * 1000;
 }
 
 pet_behavior_handle_t pet_behavior_create(const pet_behavior_config_t *cfg)

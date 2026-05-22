@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define PET_BEHAVIOR_ALGO_VERSION "v6.0.0-run-stage"
+#define PET_BEHAVIOR_ALGO_VERSION "v6.2.0-fast-not-worn"
 #define PET_BEHAVIOR_HISTORY_MAX 8
 
 typedef enum {
@@ -71,6 +71,7 @@ typedef struct {
      * 并且持续一段时间后才判 NOT_WORN。
      * 如果只是长时间安静但仍有轻微微动，则更像 SLEEP。
      */
+    /* acc_mean 不再强制接近 1g：有些静置文件会出现固定 6.928g，但只要波动极低仍应判未佩戴。 */
     float not_worn_acc_std_th;
     float not_worn_acc_range_th;
     float not_worn_acc_delta_th;
@@ -114,6 +115,7 @@ typedef struct {
 
     // 长时间判断
     // not_worn_after_rest_ms 基于“超静止”计时；sleep_after_rest_ms 基于普通 REST 计时。
+    // v6.2 默认更快：放下后约 20 秒超静止即可进入 NOT_WORN。
     uint32_t sleep_after_rest_ms;
     uint32_t not_worn_after_rest_ms;
 } pet_behavior_config_t;

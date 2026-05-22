@@ -108,19 +108,28 @@ pet_state_t decide_raw_from_history(pet_behavior_handle_t h,
     update_rest_timer(h, rest_like, now_ms);
 
     /*
-     * v5 新增：先判断“超静止”。
-     * 桌面/取下放置会连续多个窗口 ultra_static；睡觉也很安静，但通常会有呼吸、皮毛/项圈微动、姿态轻微变化。
+     * v6.2：NOT_WORN 优先级最高。
+     *
+     * 用户这批“放地上不动”数据非常典型：
+     * acc 基本在 0.999~1.001，acc_std/range/delta 接近 0，gyro 也接近 0。
+     * 这种不是 REST/SLEEP，而是“设备取下后完全静止”。
+     *
+     * 注意：这里不再要求 raw 必须先被判 REST。
+     * 因为刚拿起/放下后，历史窗口里可能还残留 TROT/RUN/WALK 票数，
+     * 如果 ultra_static 已经连续出现，就应该直接覆盖为 NOT_WORN。
      */
     bool ultra_static_like =
-        raw == PET_STATE_REST &&
         s->valid >= 3 &&
         s->ultra_static >= (s->valid >= 5 ? 4 : s->valid) &&
-        s->avg_activity < 5.0f &&
+        s->avg_activity < 8.0f &&
         s->avg_acc_std <= c->not_worn_acc_std_th &&
+        s->avg_acc_delta <= c->not_worn_acc_delta_th &&
         s->avg_gyro_mean <= c->not_worn_gyro_mean_th &&
         s->avg_gyro_std <= c->not_worn_gyro_std_th &&
         s->avg_acc_range <= c->not_worn_acc_range_th &&
-        s->avg_gyro_range <= c->not_worn_gyro_range_th;
+        s->avg_gyro_range <= c->not_worn_gyro_range_th &&
+        s->avg_gyro_delta <= c->not_worn_gyro_delta_th &&
+        s->avg_posture_std <= c->not_worn_posture_std_th;
 
     update_ultra_static_timer(h, ultra_static_like, now_ms);
 
@@ -131,15 +140,21 @@ pet_state_t decide_raw_from_history(pet_behavior_handle_t h,
                                    ? now_ms - h->ultra_static_since_ms
                                    : 0;
 
-    if (raw == PET_STATE_REST && ultra_static_ms >= c->not_worn_after_rest_ms)
+    /*
+     * 如果已经是 NOT_WORN，只要当前仍然超静止，就持续保持 NOT_WORN。
+     * 如果刚放下，连续约 20 秒超静止后进入 NOT_WORN。
+     */
+    if (ultra_static_like &&
+        (h->raw_state == PET_STATE_NOT_WORN || ultra_static_ms >= c->not_worn_after_rest_ms))
     {
         raw = PET_STATE_NOT_WORN;
         conf = 100.0f;
     }
     else if (raw == PET_STATE_REST && rest_ms >= c->sleep_after_rest_ms)
     {
+        /* SLEEP 只给“安静但不是超静止”的情况。 */
         raw = PET_STATE_SLEEP;
-        conf = ultra_static_like ? 80.0f : 92.0f;
+        conf = 92.0f;
     }
 
     if (confidence_out)
@@ -161,7 +176,7 @@ uint32_t transition_required_ms(pet_state_t current, pet_state_t target)
      * WALK -> REST 也慢一点：避免走两步停一下就频繁跳。
      */
     if (target == PET_STATE_NOT_WORN)
-        return 8000;
+        return 0;
 
     if (target == PET_STATE_REST || target == PET_STATE_SLEEP)
         return 3500;

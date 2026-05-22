@@ -40,6 +40,17 @@ extern "C"
     esp_err_t pet_collar_monitor_stop(void);
     bool pet_collar_monitor_get_last_result(pet_behavior_result_t *out);
 
+    /**
+     * @brief 进入/退出高频录制模式。
+     *
+     * enabled=true 时，监测任务使用更短 sample_period_ms，并可把每个 IMU sample 写入 Rxxxxxx.CSV。
+     * sample_period_ms 建议 5~10ms；0 表示使用默认 5ms。
+     */
+    esp_err_t pet_collar_monitor_set_recording_mode(bool enabled,
+                                                    uint32_t sample_period_ms,
+                                                    bool raw_sample_log);
+    bool pet_collar_monitor_is_recording_mode(void);
+
 #ifdef __cplusplus
 }
 #endif
