@@ -62,10 +62,10 @@ static void pet_monitor_task(void *arg)
     {
         pet_telemetry_config_t tel_cfg = {
             .url = s_cfg.http_url,
-            .queue_size = 8,
+            .queue_size = 16,
             .task_stack_size = 6144,
             .task_priority = 4,
-            .timeout_ms = s_cfg.http_timeout_ms ? s_cfg.http_timeout_ms : 2000,
+            .timeout_ms = s_cfg.http_timeout_ms ? s_cfg.http_timeout_ms : 1500,
         };
 
         esp_err_t tel_ret = pet_telemetry_start(&tel_cfg);
@@ -172,14 +172,19 @@ static void pet_monitor_task(void *arg)
                 if (state_changed || time_to_print)
                 {
                     ESP_LOGI(TAG,
-                             "state=%s candidate=%s event=%s acc=%.3f gyro=%.2f "
-                             "acc_std=%.3f gyro_std=%.2f pitch=%.1f roll=%.1f",
+                             "state=%s candidate=%s event=%s "
+                             "acc=%.3f gyro=%.2f "
+                             "acc_mean=%.3f acc_std=%.3f "
+                             "gyro_mean=%.2f gyro_std=%.2f "
+                             "pitch=%.1f roll=%.1f",
                              pet_state_to_str(result.state),
                              pet_state_to_str(result.candidate_state),
                              event_buf,
                              result.acc_norm_g,
                              result.gyro_norm_dps,
+                             result.acc_norm_mean,
                              result.acc_norm_std,
+                             result.gyro_norm_mean,
                              result.gyro_norm_std,
                              result.pitch_deg,
                              result.roll_deg);
@@ -246,7 +251,11 @@ esp_err_t pet_collar_monitor_start(const pet_collar_monitor_config_t *cfg)
 
     if (s_cfg.sample_period_ms == 0)
     {
-        s_cfg.sample_period_ms = 20;
+        /*
+         * IMU 读取周期提高到 10ms，也就是 100Hz。
+         * 原来 20ms = 50Hz，慢走/走走停停的细节容易被漏掉。
+         */
+        s_cfg.sample_period_ms = 10;
     }
 
     if (s_cfg.task_stack_size == 0)
@@ -263,10 +272,21 @@ esp_err_t pet_collar_monitor_start(const pet_collar_monitor_config_t *cfg)
         .bus = s_cfg.bus,
         .i2c_addr = s_cfg.qmi8658a_addr,
         .scl_speed_hz = 400000,
-        .accel_fs = QMI8658A_ACCEL_FS_8G,
+        /*
+         * 提高加速度计分辨率：±8g -> ±4g。
+         * QMI8658A 在 ±4g 下是 8192 LSB/g，比 ±8g 的 4096 LSB/g 更细。
+         * 宠物项圈正常走路/趴着/小跑通常不会超过 ±4g；如果你主要测试剧烈甩动，才改回 ±8g。
+         */
+        .accel_fs = QMI8658A_ACCEL_FS_4G,
+        /*
+         * 陀螺仪保持 ±512dps，避免 SHAKE/PLAY 时过早饱和。
+         */
         .gyro_fs = QMI8658A_GYRO_FS_512DPS,
-        .accel_odr = QMI8658A_ACC_ODR_500HZ,
-        .gyro_odr = QMI8658A_GYR_ODR_448HZ,
+        /*
+         * 提高 IMU 内部 ODR，主任务仍按 sample_period_ms 读取。
+         */
+        .accel_odr = QMI8658A_ACC_ODR_1000HZ,
+        .gyro_odr = QMI8658A_GYR_ODR_896HZ,
         .enable_lpf = true,
     };
 
@@ -283,6 +303,12 @@ esp_err_t pet_collar_monitor_start(const pet_collar_monitor_config_t *cfg)
     pet_behavior_config_t behavior_cfg;
     pet_behavior_default_config(&behavior_cfg);
     behavior_cfg.sample_rate_hz = 1000.0f / (float)s_cfg.sample_period_ms;
+    /*
+     * 每 1 秒完成一个判断窗口，这样终端日志和 HTTP POST 都能 1 秒级刷新。
+     * 如果后面觉得状态抖动，再把 min_state_hold_ms 调到 2000~3000。
+     */
+    behavior_cfg.window_ms = 1000;
+    behavior_cfg.min_state_hold_ms = 2000;
 
     s_behavior = pet_behavior_create(&behavior_cfg);
     if (!s_behavior)

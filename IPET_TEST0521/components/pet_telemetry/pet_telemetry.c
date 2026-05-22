@@ -30,10 +30,10 @@
  * EVENT：
  *     最快 1 秒上传一次，避免 SHAKE 连续刷屏
  */
-#define UPLOAD_INTERVAL_REST_MS     30000
-#define UPLOAD_INTERVAL_ACTIVE_MS   5000
+#define UPLOAD_INTERVAL_REST_MS     1000
+#define UPLOAD_INTERVAL_ACTIVE_MS   1000
 #define UPLOAD_INTERVAL_EVENT_MS    1000
-#define UPLOAD_INTERVAL_UNKNOWN_MS  10000
+#define UPLOAD_INTERVAL_UNKNOWN_MS  1000
 
 /*
  * HTTP 失败退避：
@@ -44,8 +44,8 @@
  * 第 4 次失败：40 秒后再试
  * 后续最多：60 秒后再试
  */
-#define BACKOFF_BASE_MS             5000
-#define BACKOFF_MAX_MS              60000
+#define BACKOFF_BASE_MS             1000
+#define BACKOFF_MAX_MS              10000
 
 typedef struct {
     uint32_t now_ms;
@@ -187,7 +187,7 @@ static esp_err_t post_json(const char *json)
         int len = esp_http_client_get_content_length(client);
 
         if (status >= 200 && status < 300) {
-            ESP_LOGI(TAG, "POST OK, status=%d, len=%d", status, len);
+            ESP_LOGI(TAG, "POST OK, status=%d, len=%d, json=%s", status, len, json);
             ret = ESP_OK;
         } else {
             ESP_LOGW(TAG, "POST HTTP status failed, status=%d, len=%d", status, len);
@@ -252,7 +252,9 @@ static void make_json(uint32_t now_ms,
              "\"event\":\"%s\","
              "\"acc\":%.3f,"
              "\"gyro\":%.2f,"
+             "\"acc_mean\":%.3f,"
              "\"acc_std\":%.3f,"
+             "\"gyro_mean\":%.2f,"
              "\"gyro_std\":%.2f,"
              "\"pitch\":%.1f,"
              "\"roll\":%.1f,"
@@ -269,7 +271,9 @@ static void make_json(uint32_t now_ms,
              event_buf,
              r->acc_norm_g,
              r->gyro_norm_dps,
+             r->acc_norm_mean,
              r->acc_norm_std,
+             r->gyro_norm_mean,
              r->gyro_norm_std,
              r->pitch_deg,
              r->roll_deg,
@@ -322,7 +326,7 @@ esp_err_t pet_telemetry_start(const pet_telemetry_config_t *cfg)
 
     snprintf(s_url, sizeof(s_url), "%s", cfg->url);
 
-    uint32_t queue_size = cfg->queue_size ? cfg->queue_size : 8;
+    uint32_t queue_size = cfg->queue_size ? cfg->queue_size : 16;
     uint32_t stack_size = cfg->task_stack_size ? cfg->task_stack_size : 6144;
     uint32_t priority = cfg->task_priority ? cfg->task_priority : 4;
     s_timeout_ms = cfg->timeout_ms ? cfg->timeout_ms : 2000;

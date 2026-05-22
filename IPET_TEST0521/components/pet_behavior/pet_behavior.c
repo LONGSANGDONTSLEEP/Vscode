@@ -36,9 +36,36 @@ struct pet_behavior_t
     stat_win_t acc_norm_win;
     stat_win_t gyro_norm_win;
 
+    /* 新增：六轴单独窗口。慢走时 acc_norm 可能接近 1g，但单轴会变化。 */
+    stat_win_t ax_win;
+    stat_win_t ay_win;
+    stat_win_t az_win;
+    stat_win_t gx_win;
+    stat_win_t gy_win;
+    stat_win_t gz_win;
+
+    /* 新增：相邻采样变化量。用于区分真正移动和站着/趴着轻微晃动。 */
+    stat_win_t acc_delta_win;
+    stat_win_t gyro_delta_win;
+
+    /* 新增：姿态窗口。用于判断站/趴稳定和翻滚。 */
+    stat_win_t pitch_win;
+    stat_win_t roll_win;
+
     uint32_t win_start_ms;
     float last_pitch;
     float last_roll;
+
+    bool have_last_sample;
+    float last_ax_g;
+    float last_ay_g;
+    float last_az_g;
+    float last_gx_dps;
+    float last_gy_dps;
+    float last_gz_dps;
+
+    uint32_t last_active_ms;
+    uint32_t last_play_ms;
 
     pet_behavior_result_t last_result;
 };
@@ -46,6 +73,16 @@ struct pet_behavior_t
 static float vec_norm3(float x, float y, float z)
 {
     return sqrtf(x * x + y * y + z * z);
+}
+
+static float angle_diff_deg(float a, float b)
+{
+    float d = a - b;
+    while (d > 180.0f)
+        d -= 360.0f;
+    while (d < -180.0f)
+        d += 360.0f;
+    return fabsf(d);
 }
 
 static void stat_reset(stat_win_t *s)
@@ -77,17 +114,34 @@ static float stat_std(const stat_win_t *s)
 {
     if (!s->n)
         return 0.0f;
+
     float mean = stat_mean(s);
     float var = s->sum2 / s->n - mean * mean;
     if (var < 0.0f)
         var = 0.0f;
+
     return sqrtf(var);
+}
+
+static float stat_range(const stat_win_t *s)
+{
+    return s->n ? (s->max - s->min) : 0.0f;
 }
 
 static void reset_windows(pet_behavior_handle_t h, uint32_t now_ms)
 {
     stat_reset(&h->acc_norm_win);
     stat_reset(&h->gyro_norm_win);
+    stat_reset(&h->ax_win);
+    stat_reset(&h->ay_win);
+    stat_reset(&h->az_win);
+    stat_reset(&h->gx_win);
+    stat_reset(&h->gy_win);
+    stat_reset(&h->gz_win);
+    stat_reset(&h->acc_delta_win);
+    stat_reset(&h->gyro_delta_win);
+    stat_reset(&h->pitch_win);
+    stat_reset(&h->roll_win);
     h->win_start_ms = now_ms;
 }
 
@@ -95,58 +149,35 @@ void pet_behavior_default_config(pet_behavior_config_t *cfg)
 {
     if (!cfg)
         return;
+
     memset(cfg, 0, sizeof(*cfg));
 
     cfg->sample_rate_hz = 50.0f;
 
-    /*
-     * 原来是 1000ms。
-     * 改成 3000ms，用最近 3 秒数据判断一次主状态。
-     */
-    cfg->window_ms = 3000;
+    /* 1 秒窗口，配合 1 秒 POST/终端输出。 */
+    cfg->window_ms = 1000;
 
-    /*
-     * 原来是 3000ms。
-     * 改成 5000ms，候选状态连续 5 秒才切换正式状态。
-     */
-    cfg->min_state_hold_ms = 5000;
+    /* 这里不再简单使用一个固定防抖，apply_state_debounce() 里做非对称防抖。 */
+    cfg->min_state_hold_ms = 1200;
 
-    /*
-     * 静止阈值稍微放宽。
-     */
-    cfg->rest_acc_std_th = 0.035f;
-    cfg->rest_gyro_mean_th = 5.0f;
+    cfg->rest_acc_std_th = 0.045f;
+    cfg->rest_gyro_mean_th = 18.0f;
 
-    /*
-     * 运动阈值提高，避免轻微晃动就判断成 WALK/RUN/PLAY。
-     */
-    cfg->walk_acc_std_th = 0.050f;
-    cfg->trot_acc_std_th = 0.120f;
-    cfg->run_acc_std_th = 0.220f;
+    /* acc_norm 阈值不要太高；慢走时 acc_norm_std 经常不大。 */
+    cfg->walk_acc_std_th = 0.085f;
+    cfg->trot_acc_std_th = 0.180f;
+    cfg->run_acc_std_th = 0.320f;
 
-    /*
-     * 原来 80 太敏感，容易乱判 PLAY。
-     */
-    cfg->play_gyro_std_th = 150.0f;
+    /* PLAY 不再只靠 gyro_mean，主要看 gyro_std + burst。 */
+    cfg->play_gyro_std_th = 135.0f;
 
-    /*
-     * 撞击、跳跃暂时保持。
-     */
     cfg->impact_acc_norm_th = 3.0f;
-    cfg->jump_low_g_th = 0.45f;
-    cfg->jump_land_g_th = 2.0f;
+    cfg->jump_low_g_th = 0.50f;
+    cfg->jump_land_g_th = 1.85f;
+    cfg->shake_gyro_th = 450.0f;
 
-    /*
-     * 原来 180 太低。
-     * 你日志里真正剧烈甩头是 300~900 dps。
-     */
-    cfg->shake_gyro_th = 350.0f;
-
-    /*
-     * 抓挠先判严格一点。
-     */
-    cfg->scratch_gyro_std_min = 45.0f;
-    cfg->scratch_acc_std_min = 0.05f;
+    cfg->scratch_gyro_std_min = 120.0f;
+    cfg->scratch_acc_std_min = 0.10f;
 
     cfg->sleep_after_rest_ms = 5 * 60 * 1000;
     cfg->not_worn_after_rest_ms = 20 * 60 * 1000;
@@ -185,12 +216,27 @@ void pet_behavior_reset(pet_behavior_handle_t h)
     h->candidate = PET_STATE_UNKNOWN;
     h->candidate_since_ms = 0;
     h->state_since_ms = 0;
+
     h->rest_like_since_ms = 0;
     h->rest_like_active = false;
+
     h->low_g_since_ms = 0;
     h->low_g_active = false;
+
     h->last_pitch = 0.0f;
     h->last_roll = 0.0f;
+
+    h->have_last_sample = false;
+    h->last_ax_g = 0.0f;
+    h->last_ay_g = 0.0f;
+    h->last_az_g = 0.0f;
+    h->last_gx_dps = 0.0f;
+    h->last_gy_dps = 0.0f;
+    h->last_gz_dps = 0.0f;
+
+    h->last_active_ms = 0;
+    h->last_play_ms = 0;
+
     memset(&h->last_result, 0, sizeof(h->last_result));
     reset_windows(h, 0);
 }
@@ -204,12 +250,97 @@ static pet_state_t classify_from_window(pet_behavior_handle_t h,
 {
     const pet_behavior_config_t *c = &h->cfg;
 
-    const bool rest_like =
-        fabsf(acc_mean - 1.0f) < 0.08f &&
-        acc_std < c->rest_acc_std_th &&
-        gyro_mean < c->rest_gyro_mean_th;
+    float ax_std = stat_std(&h->ax_win);
+    float ay_std = stat_std(&h->ay_win);
+    float az_std = stat_std(&h->az_win);
+    float gx_std = stat_std(&h->gx_win);
+    float gy_std = stat_std(&h->gy_win);
+    float gz_std = stat_std(&h->gz_win);
 
-    if (rest_like)
+    float acc_axis_std = sqrtf(ax_std * ax_std + ay_std * ay_std + az_std * az_std);
+    float gyro_axis_std = sqrtf(gx_std * gx_std + gy_std * gy_std + gz_std * gz_std);
+    float acc_delta_mean = stat_mean(&h->acc_delta_win);
+    float gyro_delta_mean = stat_mean(&h->gyro_delta_win);
+    float acc_range = stat_range(&h->acc_norm_win);
+    float gyro_range = stat_range(&h->gyro_norm_win);
+    float pitch_std = stat_std(&h->pitch_win);
+    float roll_std = stat_std(&h->roll_win);
+    float posture_std = pitch_std + roll_std;
+
+    bool acc_near_1g = fabsf(acc_mean - 1.0f) < 0.22f;
+
+    /*
+     * 真静止：站着不动、趴着不动都属于 REST。
+     * 如果你需要区分 STAND 和 REST，需要在 pet_state_t 里新增 PET_STATE_STAND。
+     */
+    bool strict_rest =
+        acc_near_1g &&
+        acc_std < c->rest_acc_std_th &&
+        acc_axis_std < 0.075f &&
+        acc_delta_mean < 0.018f &&
+        gyro_mean < c->rest_gyro_mean_th &&
+        gyro_std < 18.0f &&
+        posture_std < 5.0f;
+
+    /* 趴着喘气：允许轻微周期起伏，但不能有明显单轴步态/jerk。 */
+    bool panting_rest =
+        acc_near_1g &&
+        acc_std < 0.115f &&
+        acc_axis_std < 0.155f &&
+        acc_delta_mean < 0.040f &&
+        gyro_mean < 75.0f &&
+        gyro_std < 65.0f &&
+        posture_std < 12.0f;
+
+    bool motion_like =
+        acc_std >= c->walk_acc_std_th ||
+        acc_axis_std >= 0.125f ||
+        acc_delta_mean >= 0.030f ||
+        gyro_mean >= 35.0f ||
+        gyro_std >= 28.0f ||
+        posture_std >= 8.0f;
+
+    bool burst_like =
+        acc_range > 0.90f ||
+        gyro_range > 280.0f ||
+        gyro_delta_mean > 90.0f;
+
+    /*
+     * PLAY 不能只靠 gyro_mean，否则慢跑/奔跑很容易被归成 PLAY。
+     * 这里要求“高 gyro_std 或 burst”，并且同时有加速度/jerk 配合。
+     */
+    bool play_like =
+        (gyro_std >= c->play_gyro_std_th && (acc_std > 0.18f || acc_delta_mean > 0.055f || gyro_mean > 130.0f)) ||
+        (gyro_mean > 260.0f && gyro_std > 75.0f) ||
+        (acc_std > 0.55f && gyro_std > 85.0f) ||
+        burst_like;
+
+    if (play_like)
+    {
+        h->last_active_ms = now_ms;
+        h->last_play_ms = now_ms;
+        h->rest_like_active = false;
+        h->rest_like_since_ms = 0;
+        return PET_STATE_PLAY;
+    }
+
+    if (motion_like)
+    {
+        h->last_active_ms = now_ms;
+    }
+
+    /* 丢球游戏有短暂停顿：刚刚发生过 PLAY，不要 1~2 秒停顿就掉 REST。 */
+    bool recent_play_pause =
+        h->last_play_ms > 0 &&
+        (now_ms - h->last_play_ms) < 5000 &&
+        !strict_rest;
+
+    if (recent_play_pause)
+    {
+        return PET_STATE_PLAY;
+    }
+
+    if (strict_rest || panting_rest)
     {
         if (!h->rest_like_active)
         {
@@ -223,41 +354,48 @@ static pet_state_t classify_from_window(pet_behavior_handle_t h,
         h->rest_like_since_ms = 0;
     }
 
-    uint32_t rest_ms = (h->rest_like_active && h->rest_like_since_ms > 0) ? now_ms - h->rest_like_since_ms : 0;
+    uint32_t rest_ms = (h->rest_like_active && h->rest_like_since_ms > 0)
+                           ? now_ms - h->rest_like_since_ms
+                           : 0;
 
-    if (rest_like && rest_ms >= c->not_worn_after_rest_ms)
+    if ((strict_rest || panting_rest) && rest_ms >= c->not_worn_after_rest_ms)
     {
         return PET_STATE_NOT_WORN;
     }
-    if (rest_like && rest_ms >= c->sleep_after_rest_ms)
+
+    if ((strict_rest || panting_rest) && rest_ms >= c->sleep_after_rest_ms)
     {
         return PET_STATE_SLEEP;
     }
-    if (rest_like)
+
+    if (strict_rest || panting_rest)
     {
         return PET_STATE_REST;
     }
 
-    // 被动运动：有轻微晃动但没有明显步态。后续可结合 GPS/速度/充电/佩戴检测修正。
-    if (acc_std < c->walk_acc_std_th && gyro_mean >= c->rest_gyro_mean_th && gyro_std < 10.0f)
+    /* 被抱着/被动车动：角速度有变化，但加速度步态和 jerk 不明显。 */
+    if (gyro_mean > 55.0f &&
+        gyro_axis_std > 35.0f &&
+        acc_std < 0.080f &&
+        acc_axis_std < 0.105f &&
+        acc_delta_mean < 0.028f)
     {
         return PET_STATE_PASSIVE_MOTION;
     }
 
-    // 玩耍：旋转/摆头/方向变化较多，通常比跑步更无规律。
-    if (gyro_std >= c->play_gyro_std_th || gyro_mean > 120.0f)
-    {
-        return PET_STATE_PLAY;
-    }
-    if (acc_std >= c->run_acc_std_th)
+    /* 二级速度分类：优先用 acc_norm，其次用单轴 std 和 jerk。 */
+    if (acc_std >= c->run_acc_std_th || acc_axis_std >= 0.52f || acc_delta_mean >= 0.135f)
     {
         return PET_STATE_RUN;
     }
-    if (acc_std >= c->trot_acc_std_th)
+
+    if (acc_std >= c->trot_acc_std_th || acc_axis_std >= 0.32f || acc_delta_mean >= 0.080f)
     {
         return PET_STATE_TROT;
     }
-    if (acc_std >= c->walk_acc_std_th)
+
+    if (acc_std >= c->walk_acc_std_th || acc_axis_std >= 0.125f || acc_delta_mean >= 0.030f ||
+        (gyro_mean > 35.0f && gyro_std > 22.0f && posture_std > 4.0f))
     {
         return PET_STATE_WALK;
     }
@@ -276,12 +414,17 @@ static uint32_t detect_events(pet_behavior_handle_t h,
     const pet_behavior_config_t *c = &h->cfg;
     uint32_t ev = PET_EVENT_NONE;
 
+    float acc_delta_mean = stat_mean(&h->acc_delta_win);
+    float gyro_delta_mean = stat_mean(&h->gyro_delta_win);
+    float acc_range = stat_range(&h->acc_norm_win);
+    float gyro_range = stat_range(&h->gyro_norm_win);
+
     if (acc_norm >= c->impact_acc_norm_th)
     {
         ev |= PET_EVENT_IMPACT;
     }
 
-    // Jump: 先出现低 g，再出现落地高 g。
+    /* Jump: 先低 g，再高 g；同时允许强烈 acc_range 触发。 */
     if (acc_norm < c->jump_low_g_th)
     {
         if (!h->low_g_active)
@@ -294,60 +437,62 @@ static uint32_t detect_events(pet_behavior_handle_t h,
     if (h->low_g_active)
     {
         uint32_t low_g_ms = now_ms - h->low_g_since_ms;
-        if (acc_norm > c->jump_land_g_th && low_g_ms >= 40 && low_g_ms <= 600)
+
+        if ((acc_norm > c->jump_land_g_th || acc_range > 1.20f) &&
+            low_g_ms >= 30 &&
+            low_g_ms <= 700)
         {
             ev |= PET_EVENT_JUMP;
             h->low_g_active = false;
         }
-        else if (low_g_ms > 800)
+        else if (low_g_ms > 900)
         {
             h->low_g_active = false;
         }
     }
 
-    // 甩头/抖毛：瞬时角速度很大。
-    bool strong_shake = gyro_norm > c->shake_gyro_th;
-
-    if (strong_shake)
+    if (gyro_norm > c->shake_gyro_th ||
+        (gyro_range > 520.0f && gyro_delta_mean > 120.0f))
     {
         ev |= PET_EVENT_SHAKE;
     }
 
-    /*
-     * 抓挠不是“动得越大越像”，而是：
-     * 中等强度 + 持续 + 规律 + 姿态变化不大。
-     *
-     * 第一版先保守一点：
-     * gyro 太大时优先认为是 SHAKE，不判 SCRATCH。
-     */
-    if (!strong_shake &&
-        gyro_norm < 250.0f &&
-        acc_norm > 0.70f &&
-        acc_norm < 1.50f &&
+    bool high_activity =
+        acc_std > 0.20f ||
+        acc_delta_mean > 0.060f ||
+        gyro_std > 110.0f ||
+        gyro_norm > 280.0f;
+
+    /* 抓挠只在中等强度、相对稳定姿态下判断；剧烈玩耍时不报 SCRATCH。 */
+    if (!high_activity &&
+        !(ev & PET_EVENT_SHAKE) &&
+        gyro_norm > 90.0f &&
+        gyro_norm < 260.0f &&
+        acc_norm > 0.80f &&
+        acc_norm < 1.45f &&
         gyro_std >= c->scratch_gyro_std_min &&
         acc_std >= c->scratch_acc_std_min &&
-        acc_std < 0.25f)
+        acc_std < 0.24f)
     {
         ev |= PET_EVENT_SCRATCH;
     }
 
-    // 翻滚：姿态变化大且角速度明显。
-    float pitch = atan2f(-s->ax_g, sqrtf(s->ay_g * s->ay_g + s->az_g * s->az_g)) * 180.0f / (float)M_PI;
-    float roll = atan2f(s->ay_g, s->az_g) * 180.0f / (float)M_PI;
-    float d_angle = fabsf(pitch - h->last_pitch) + fabsf(roll - h->last_roll);
+    float pitch = atan2f(-s->ax_g,
+                         sqrtf(s->ay_g * s->ay_g + s->az_g * s->az_g)) *
+                  180.0f / (float)M_PI;
 
+    float roll = atan2f(s->ay_g, s->az_g) *
+                 180.0f / (float)M_PI;
 
-    /*
-     * acc_norm 接近 1g 时，pitch/roll 才可信。
-     * 剧烈甩动时 acc_norm 可能是 0.3g 或 2.6g，
-     * 这时候姿态角会乱跳，不应该轻易判断翻滚。
-     */
-    bool attitude_valid = (acc_norm > 0.80f && acc_norm < 1.20f);
+    float d_angle = angle_diff_deg(pitch, h->last_pitch) +
+                    angle_diff_deg(roll, h->last_roll);
+
+    bool attitude_valid = (acc_norm > 0.75f && acc_norm < 1.30f);
 
     if (attitude_valid &&
-        d_angle > 120.0f &&
-        gyro_norm > 120.0f &&
-        gyro_norm < 500.0f)
+        d_angle > 100.0f &&
+        gyro_norm > 100.0f &&
+        gyro_norm < 650.0f)
     {
         ev |= PET_EVENT_ROLL_OVER;
     }
@@ -358,7 +503,34 @@ static uint32_t detect_events(pet_behavior_handle_t h,
     return ev;
 }
 
-static void apply_state_debounce(pet_behavior_handle_t h, pet_state_t candidate, uint32_t now_ms)
+static uint32_t debounce_required_ms(pet_state_t current, pet_state_t candidate)
+{
+    if (current == PET_STATE_UNKNOWN)
+        return 0;
+
+    if (candidate == PET_STATE_PLAY)
+        return 500;
+
+    if (current == PET_STATE_PLAY && candidate == PET_STATE_REST)
+        return 6000;
+
+    if ((current == PET_STATE_WALK || current == PET_STATE_TROT || current == PET_STATE_RUN) &&
+        candidate == PET_STATE_REST)
+        return 3500;
+
+    if (current == PET_STATE_REST &&
+        (candidate == PET_STATE_WALK || candidate == PET_STATE_TROT || candidate == PET_STATE_RUN))
+        return 800;
+
+    if (candidate == PET_STATE_REST)
+        return 2500;
+
+    return 1200;
+}
+
+static void apply_state_debounce(pet_behavior_handle_t h,
+                                 pet_state_t candidate,
+                                 uint32_t now_ms)
 {
     if (h->state == PET_STATE_UNKNOWN)
     {
@@ -383,7 +555,8 @@ static void apply_state_debounce(pet_behavior_handle_t h, pet_state_t candidate,
         return;
     }
 
-    if ((now_ms - h->candidate_since_ms) >= h->cfg.min_state_hold_ms)
+    uint32_t need_ms = debounce_required_ms(h->state, candidate);
+    if ((now_ms - h->candidate_since_ms) >= need_ms)
     {
         h->state = candidate;
         h->state_since_ms = now_ms;
@@ -407,19 +580,64 @@ bool pet_behavior_update(pet_behavior_handle_t h,
         h->candidate_since_ms = now_ms;
     }
 
-    float acc_norm = vec_norm3(sample->ax_g, sample->ay_g, sample->az_g);
-    float gyro_norm = vec_norm3(sample->gx_dps, sample->gy_dps, sample->gz_dps);
+    float acc_norm = vec_norm3(sample->ax_g,
+                               sample->ay_g,
+                               sample->az_g);
+
+    float gyro_norm = vec_norm3(sample->gx_dps,
+                                sample->gy_dps,
+                                sample->gz_dps);
+
+    float pitch = atan2f(-sample->ax_g,
+                         sqrtf(sample->ay_g * sample->ay_g +
+                               sample->az_g * sample->az_g)) *
+                  180.0f / (float)M_PI;
+
+    float roll = atan2f(sample->ay_g,
+                        sample->az_g) *
+                 180.0f / (float)M_PI;
 
     stat_push(&h->acc_norm_win, acc_norm);
     stat_push(&h->gyro_norm_win, gyro_norm);
 
+    stat_push(&h->ax_win, sample->ax_g);
+    stat_push(&h->ay_win, sample->ay_g);
+    stat_push(&h->az_win, sample->az_g);
+    stat_push(&h->gx_win, sample->gx_dps);
+    stat_push(&h->gy_win, sample->gy_dps);
+    stat_push(&h->gz_win, sample->gz_dps);
+    stat_push(&h->pitch_win, pitch);
+    stat_push(&h->roll_win, roll);
+
+    if (h->have_last_sample)
+    {
+        float acc_delta = vec_norm3(sample->ax_g - h->last_ax_g,
+                                    sample->ay_g - h->last_ay_g,
+                                    sample->az_g - h->last_az_g);
+        float gyro_delta = vec_norm3(sample->gx_dps - h->last_gx_dps,
+                                     sample->gy_dps - h->last_gy_dps,
+                                     sample->gz_dps - h->last_gz_dps);
+        stat_push(&h->acc_delta_win, acc_delta);
+        stat_push(&h->gyro_delta_win, gyro_delta);
+    }
+
+    h->have_last_sample = true;
+    h->last_ax_g = sample->ax_g;
+    h->last_ay_g = sample->ay_g;
+    h->last_az_g = sample->az_g;
+    h->last_gx_dps = sample->gx_dps;
+    h->last_gy_dps = sample->gy_dps;
+    h->last_gz_dps = sample->gz_dps;
+
     bool window_ready = (now_ms - h->win_start_ms) >= h->cfg.window_ms;
+
     float acc_mean = h->last_result.acc_norm_mean;
     float acc_std = h->last_result.acc_norm_std;
     float gyro_mean = h->last_result.gyro_norm_mean;
     float gyro_std = h->last_result.gyro_norm_std;
 
     pet_state_t candidate = h->candidate;
+
     if (window_ready)
     {
         acc_mean = stat_mean(&h->acc_norm_win);
@@ -427,15 +645,24 @@ bool pet_behavior_update(pet_behavior_handle_t h,
         gyro_mean = stat_mean(&h->gyro_norm_win);
         gyro_std = stat_std(&h->gyro_norm_win);
 
-        candidate = classify_from_window(h, acc_mean, acc_std, gyro_mean, gyro_std, now_ms);
+        candidate = classify_from_window(h,
+                                         acc_mean,
+                                         acc_std,
+                                         gyro_mean,
+                                         gyro_std,
+                                         now_ms);
+
         apply_state_debounce(h, candidate, now_ms);
         reset_windows(h, now_ms);
     }
 
-    uint32_t events = detect_events(h, sample, acc_norm, gyro_norm, gyro_std, acc_std, now_ms);
-
-    float pitch = atan2f(-sample->ax_g, sqrtf(sample->ay_g * sample->ay_g + sample->az_g * sample->az_g)) * 180.0f / (float)M_PI;
-    float roll = atan2f(sample->ay_g, sample->az_g) * 180.0f / (float)M_PI;
+    uint32_t events = detect_events(h,
+                                    sample,
+                                    acc_norm,
+                                    gyro_norm,
+                                    gyro_std,
+                                    acc_std,
+                                    now_ms);
 
     pet_behavior_result_t r = {
         .state = h->state,
@@ -450,7 +677,9 @@ bool pet_behavior_update(pet_behavior_handle_t h,
         .gyro_norm_mean = gyro_mean,
         .gyro_norm_std = gyro_std,
         .state_duration_ms = now_ms - h->state_since_ms,
-        .rest_like_duration_ms = (h->rest_like_active && h->rest_like_since_ms > 0) ? now_ms - h->rest_like_since_ms : 0,
+        .rest_like_duration_ms = (h->rest_like_active && h->rest_like_since_ms > 0)
+                                     ? now_ms - h->rest_like_since_ms
+                                     : 0,
         .sample_count = h->last_result.sample_count + 1,
     };
 
@@ -495,6 +724,7 @@ void pet_events_to_str(uint32_t events, char *buf, uint32_t buf_len)
         return;
 
     buf[0] = '\0';
+
     if (events == PET_EVENT_NONE)
     {
         snprintf(buf, buf_len, "NONE");
@@ -502,6 +732,7 @@ void pet_events_to_str(uint32_t events, char *buf, uint32_t buf_len)
     }
 
     bool first = true;
+
     struct
     {
         uint32_t bit;
@@ -519,8 +750,13 @@ void pet_events_to_str(uint32_t events, char *buf, uint32_t buf_len)
         if (events & map[i].bit)
         {
             size_t used = strlen(buf);
-            snprintf(buf + used, buf_len > used ? buf_len - used : 0,
-                     "%s%s", first ? "" : "|", map[i].name);
+
+            snprintf(buf + used,
+                     buf_len > used ? buf_len - used : 0,
+                     "%s%s",
+                     first ? "" : "|",
+                     map[i].name);
+
             first = false;
         }
     }
