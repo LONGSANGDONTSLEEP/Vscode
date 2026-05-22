@@ -236,9 +236,10 @@ static void make_json(uint32_t now_ms,
     pet_time_snapshot_t ts;
     pet_time_get_snapshot(&ts);
 
-    char event_buf[96];
-    pet_events_to_str(r->events, event_buf, sizeof(event_buf));
-
+    /*
+     * 实时终端/HTTP 只发送稳定后的当前状态。
+     * candidate/raw_state/acc/gyro 等详细调试字段仍写入 SD CSV，避免终端刷屏。
+     */
     snprintf(buf,
              buf_len,
              "{"
@@ -248,18 +249,7 @@ static void make_json(uint32_t now_ms,
              "\"time_valid\":%d,"
              "\"time_str\":\"%s\","
              "\"state\":\"%s\","
-             "\"candidate\":\"%s\","
-             "\"event\":\"%s\","
-             "\"acc\":%.3f,"
-             "\"gyro\":%.2f,"
-             "\"acc_mean\":%.3f,"
-             "\"acc_std\":%.3f,"
-             "\"gyro_mean\":%.2f,"
-             "\"gyro_std\":%.2f,"
-             "\"pitch\":%.1f,"
-             "\"roll\":%.1f,"
-             "\"state_duration_ms\":%lu,"
-             "\"rest_like_ms\":%lu"
+             "\"state_duration_ms\":%lu"
              "}",
              (unsigned long)ts.boot_id,
              (unsigned long long)ts.time_ms,
@@ -267,18 +257,7 @@ static void make_json(uint32_t now_ms,
              ts.time_valid ? 1 : 0,
              ts.time_str,
              pet_state_to_str(r->state),
-             pet_state_to_str(r->candidate_state),
-             event_buf,
-             r->acc_norm_g,
-             r->gyro_norm_dps,
-             r->acc_norm_mean,
-             r->acc_norm_std,
-             r->gyro_norm_mean,
-             r->gyro_norm_std,
-             r->pitch_deg,
-             r->roll_deg,
-             (unsigned long)r->state_duration_ms,
-             (unsigned long)r->rest_like_duration_ms);
+             (unsigned long)r->state_duration_ms);
 }
 
 static void telemetry_task(void *arg)

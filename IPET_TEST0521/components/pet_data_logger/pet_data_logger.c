@@ -251,7 +251,7 @@ static esp_err_t ensure_current_headers(void)
 
     ret = ensure_csv_header(
         s_state_path,
-        "boot_id,time_ms,epoch_ms,time_valid,time_str,state,candidate,event,acc,gyro,acc_std,gyro_std,pitch,roll,state_duration_ms,rest_like_ms"
+        "boot_id,time_ms,epoch_ms,time_valid,time_str,state,raw_state,candidate,event,acc,gyro,acc_mean,acc_std,gyro_mean,gyro_std,acc_axis_std,gyro_axis_std,acc_delta_mean,gyro_delta_mean,acc_range,gyro_range,posture_std,activity_score,rest_score,rhythm_score,irregular_score,burst_score,confidence,history_count,vote_rest,vote_walk,vote_trot,vote_run,vote_play,vote_passive,pitch,roll,state_duration_ms,rest_like_ms,algo_version"
     );
     if (ret != ESP_OK) {
         return ret;
@@ -259,7 +259,7 @@ static esp_err_t ensure_current_headers(void)
 
     ret = ensure_csv_header(
         s_event_path,
-        "boot_id,time_ms,epoch_ms,time_valid,time_str,event,state,candidate,acc,gyro,acc_std,gyro_std,pitch,roll,state_duration_ms,rest_like_ms"
+        "boot_id,time_ms,epoch_ms,time_valid,time_str,event,state,raw_state,candidate,acc,gyro,acc_mean,acc_std,gyro_mean,gyro_std,acc_axis_std,gyro_axis_std,acc_delta_mean,gyro_delta_mean,acc_range,gyro_range,posture_std,activity_score,rest_score,rhythm_score,irregular_score,burst_score,confidence,history_count,vote_rest,vote_walk,vote_trot,vote_run,vote_play,vote_passive,pitch,roll,state_duration_ms,rest_like_ms,algo_version"
     );
     if (ret != ESP_OK) {
         return ret;
@@ -393,23 +393,47 @@ esp_err_t pet_data_logger_write_state(uint32_t now_ms, const pet_behavior_result
     }
 
     fprintf(f,
-            "%08lx,%llu,%lld,%d,\"%s\",%s,%s,%s,%.3f,%.2f,%.3f,%.2f,%.1f,%.1f,%lu,%lu\n",
+            "%08lx,%llu,%lld,%d,\"%s\",%s,%s,%s,%s,%.3f,%.2f,%.3f,%.3f,%.2f,%.2f,%.3f,%.2f,%.4f,%.2f,%.3f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%u,%u,%u,%u,%u,%u,%.1f,%.1f,%lu,%lu,%s\n",
             (unsigned long)ts.boot_id,
             (unsigned long long)ts.time_ms,
             (long long)ts.epoch_ms,
             ts.time_valid ? 1 : 0,
             ts.time_str,
             pet_state_to_str(result->state),
+            pet_state_to_str(result->raw_state),
             pet_state_to_str(result->candidate_state),
             event_buf,
             result->acc_norm_g,
             result->gyro_norm_dps,
+            result->acc_norm_mean,
             result->acc_norm_std,
+            result->gyro_norm_mean,
             result->gyro_norm_std,
+            result->acc_axis_std,
+            result->gyro_axis_std,
+            result->acc_delta_mean,
+            result->gyro_delta_mean,
+            result->acc_range,
+            result->gyro_range,
+            result->posture_std,
+            result->activity_score,
+            result->rest_score,
+            result->rhythm_score,
+            result->irregular_score,
+            result->burst_score,
+            result->confidence,
+            (unsigned)result->history_count,
+            (unsigned)result->vote_rest,
+            (unsigned)result->vote_walk,
+            (unsigned)result->vote_trot,
+            (unsigned)result->vote_run,
+            (unsigned)result->vote_play,
+            (unsigned)result->vote_passive,
             result->pitch_deg,
             result->roll_deg,
             (unsigned long)result->state_duration_ms,
-            (unsigned long)result->rest_like_duration_ms);
+            (unsigned long)result->rest_like_duration_ms,
+            result->algo_version ? result->algo_version : "unknown");
 
     fclose(f);
     return ESP_OK;
@@ -445,7 +469,7 @@ esp_err_t pet_data_logger_write_event(uint32_t now_ms, const pet_behavior_result
     }
 
     fprintf(f,
-            "%08lx,%llu,%lld,%d,\"%s\",%s,%s,%s,%.3f,%.2f,%.3f,%.2f,%.1f,%.1f,%lu,%lu\n",
+            "%08lx,%llu,%lld,%d,\"%s\",%s,%s,%s,%s,%.3f,%.2f,%.3f,%.3f,%.2f,%.2f,%.3f,%.2f,%.4f,%.2f,%.3f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%u,%u,%u,%u,%u,%u,%.1f,%.1f,%lu,%lu,%s\n",
             (unsigned long)ts.boot_id,
             (unsigned long long)ts.time_ms,
             (long long)ts.epoch_ms,
@@ -453,15 +477,39 @@ esp_err_t pet_data_logger_write_event(uint32_t now_ms, const pet_behavior_result
             ts.time_str,
             event_buf,
             pet_state_to_str(result->state),
+            pet_state_to_str(result->raw_state),
             pet_state_to_str(result->candidate_state),
             result->acc_norm_g,
             result->gyro_norm_dps,
+            result->acc_norm_mean,
             result->acc_norm_std,
+            result->gyro_norm_mean,
             result->gyro_norm_std,
+            result->acc_axis_std,
+            result->gyro_axis_std,
+            result->acc_delta_mean,
+            result->gyro_delta_mean,
+            result->acc_range,
+            result->gyro_range,
+            result->posture_std,
+            result->activity_score,
+            result->rest_score,
+            result->rhythm_score,
+            result->irregular_score,
+            result->burst_score,
+            result->confidence,
+            (unsigned)result->history_count,
+            (unsigned)result->vote_rest,
+            (unsigned)result->vote_walk,
+            (unsigned)result->vote_trot,
+            (unsigned)result->vote_run,
+            (unsigned)result->vote_play,
+            (unsigned)result->vote_passive,
             result->pitch_deg,
             result->roll_deg,
             (unsigned long)result->state_duration_ms,
-            (unsigned long)result->rest_like_duration_ms);
+            (unsigned long)result->rest_like_duration_ms,
+            result->algo_version ? result->algo_version : "unknown");
 
     fclose(f);
     return ESP_OK;

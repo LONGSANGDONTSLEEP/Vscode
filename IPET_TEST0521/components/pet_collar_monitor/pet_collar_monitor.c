@@ -14,6 +14,9 @@
 
 #define TAG "PET_MON"
 
+/* 终端只看稳定后的当前状态，不打印 candidate/raw/debug，避免误解短窗口抖动。 */
+#define PET_TERMINAL_STATE_REPORT_MS 5000
+
 static qmi8658a_handle_t s_imu;
 static pet_behavior_handle_t s_behavior;
 static TaskHandle_t s_task;
@@ -33,9 +36,7 @@ static void pet_monitor_task(void *arg)
 {
     qmi8658a_sample_t sample;
     pet_behavior_result_t result;
-    char event_buf[96];
-
-    uint32_t last_log_ms = 0;
+    uint32_t last_user_report_ms = 0;
     pet_state_t last_print_state = PET_STATE_UNKNOWN;
 
     /*
@@ -164,32 +165,22 @@ static void pet_monitor_task(void *arg)
              */
             if (changed)
             {
-                pet_events_to_str(result.events, event_buf, sizeof(event_buf));
-
                 bool state_changed = (result.state != last_print_state);
-                bool time_to_print = (t - last_log_ms) >= 1000;
+                bool time_to_report = (t - last_user_report_ms) >= PET_TERMINAL_STATE_REPORT_MS;
+                bool should_report_user_state = state_changed || time_to_report;
 
-                if (state_changed || time_to_print)
+                /*
+                 * 终端只显示“用户真正需要看的当前状态”。
+                 * candidate/raw_state/score 仍然会写入 SD 卡 CSV，便于后续调参；
+                 * 但不再每秒刷一堆内部字段，避免测试时看起来很乱。
+                 */
+                if (should_report_user_state)
                 {
                     ESP_LOGI(TAG,
-                             "state=%s candidate=%s event=%s "
-                             "acc=%.3f gyro=%.2f "
-                             "acc_mean=%.3f acc_std=%.3f "
-                             "gyro_mean=%.2f gyro_std=%.2f "
-                             "pitch=%.1f roll=%.1f",
-                             pet_state_to_str(result.state),
-                             pet_state_to_str(result.candidate_state),
-                             event_buf,
-                             result.acc_norm_g,
-                             result.gyro_norm_dps,
-                             result.acc_norm_mean,
-                             result.acc_norm_std,
-                             result.gyro_norm_mean,
-                             result.gyro_norm_std,
-                             result.pitch_deg,
-                             result.roll_deg);
+                             "current_state=%s",
+                             pet_state_to_str(result.state));
 
-                    last_log_ms = t;
+                    last_user_report_ms = t;
                     last_print_state = result.state;
                 }
 
@@ -218,7 +209,7 @@ static void pet_monitor_task(void *arg)
                  * HTTP 上传只入队，不直接阻塞 pet_monitor。
                  * 如果 Wi-Fi 断开或电脑服务没开，上传失败也不会影响 SD 卡记录。
                  */
-                if (s_telemetry_ready)
+                if (s_telemetry_ready && should_report_user_state)
                 {
                     esp_err_t ret = pet_telemetry_enqueue_state(t, &result);
                     if (ret != ESP_OK)
