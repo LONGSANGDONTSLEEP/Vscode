@@ -10,7 +10,7 @@ void pet_behavior_default_config(pet_behavior_config_t *cfg)
     cfg->sample_rate_hz = 50.0f;
     cfg->window_ms = 1000;
     cfg->history_window_count = 7;
-    cfg->min_state_hold_ms = 2500;
+    cfg->min_state_hold_ms = 1800;
     cfg->terminal_report_interval_ms = 5000;
 
     /*
@@ -61,13 +61,15 @@ void pet_behavior_default_config(pet_behavior_config_t *cfg)
     cfg->trot_acc_std_th = 0.180f;
 
     /*
-     * v6 RUN 初始阈值：
-     * 跑步不能由 gyro 单独触发，必须看到更强的身体加速度波动。
-     * 后续拿到 WALK/RUN 标注数据后，优先调下面三个值。
+     * v12 楼道走路保护版：
+     * 全速跑样本显示 RUN 是连续多秒高身体运动；
+     * 楼道走路样本显示 WALK 也可能有短时高 gyro/d_roll，甚至旧协议会临时给 3/4，
+     * 但它的高方差/高身体冲击不连续。
+     * 因此 RUN 进一步降低 gyro 权重，增加 acc_std/acc_delta 持续要求。
      */
-    cfg->run_acc_std_th = 0.300f;
-    cfg->run_acc_delta_th = 0.110f;
-    cfg->run_gyro_mean_th = 85.0f;
+    cfg->run_acc_std_th = 0.700f;
+    cfg->run_acc_delta_th = 0.175f;
+    cfg->run_gyro_mean_th = 110.0f;
 
     cfg->play_gyro_std_th = 135.0f;
     cfg->play_gyro_range_th = 330.0f;
@@ -75,9 +77,9 @@ void pet_behavior_default_config(pet_behavior_config_t *cfg)
     cfg->play_acc_std_th = 0.38f;
     cfg->play_acc_delta_th = 0.095f;
 
-    cfg->active_enter_votes = 4;
-    cfg->rest_enter_votes = 5;
-    cfg->run_enter_votes = 4;
+    cfg->active_enter_votes = 3;
+    cfg->rest_enter_votes = 4;
+    cfg->run_enter_votes = 5;
     cfg->play_enter_votes = 3;
 
     cfg->impact_acc_norm_th = 3.0f;
@@ -88,11 +90,11 @@ void pet_behavior_default_config(pet_behavior_config_t *cfg)
     cfg->scratch_acc_std_min = 0.10f;
 
     /*
-     * v6.2：NOT_WORN 优先级提高，并且速度更快。
+     * v6.2：NOT_WORN 优先级保持不变。
      * 只要连续“几乎完全没有变化”约 20 秒，就认为是取下/放地上。
      * SLEEP 必须是“安静但仍有轻微波动”，不能抢超静止场景。
      */
-    cfg->sleep_after_rest_ms = 5 * 60 * 1000;
+    cfg->sleep_after_rest_ms = 90 * 1000;
     cfg->not_worn_after_rest_ms = 20 * 1000;
 }
 
@@ -108,7 +110,7 @@ pet_behavior_handle_t pet_behavior_create(const pet_behavior_config_t *cfg)
         pet_behavior_default_config(&h->cfg);
 
     if (h->cfg.history_window_count == 0)
-        h->cfg.history_window_count = 7;
+        h->cfg.history_window_count = 8;
     if (h->cfg.history_window_count > PET_BEHAVIOR_HISTORY_MAX)
         h->cfg.history_window_count = PET_BEHAVIOR_HISTORY_MAX;
 

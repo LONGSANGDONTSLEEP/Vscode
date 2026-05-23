@@ -12,6 +12,8 @@ idf_component_register(
         pet_collar_monitor
         pet_config
         pet_time
+        pet_power_led
+        pet_sd_remote
         qmi8658a
         wifi_manager
         wifi_ota

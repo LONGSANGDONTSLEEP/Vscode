@@ -122,11 +122,23 @@ behavior_window_t build_window_feature(pet_behavior_handle_t h, uint32_t now_ms)
     w.rhythm_score += 0.20f * score_up(w.acc_delta_mean, c->walk_acc_delta_th, c->run_acc_delta_th);
     w.rhythm_score = clampf_local(w.rhythm_score, 0.0f, 100.0f);
 
-    w.run_score = 0.40f * score_up(w.acc_std, c->trot_acc_std_th, 0.48f) +
-                  0.30f * score_up(w.acc_delta_mean, 0.070f, 0.170f) +
-                  0.20f * score_up(w.gyro_mean, c->run_gyro_mean_th, 210.0f) +
-                  0.10f * w.rhythm_score;
-    w.run_score -= 0.25f * score_up(w.irregular_score, 65.0f, 100.0f);
+    /*
+     * v12 RUN score：身体运动优先，gyro 只做辅助。
+     *
+     * 参考“全速往返跑”与“楼道走一圈”两组 BLE 样本：
+     * - RUN 会连续多秒出现高 linear/variance；
+     * - WALK 在楼道里也会因为转弯、拉绳、抬头出现高 gyro/d_roll，
+     *   但高身体方差通常不连续。
+     * 所以这里进一步提高 acc_std/acc_delta 权重，降低 gyro 权重。
+     */
+    w.run_score = 0.44f * score_up(w.acc_std, 0.60f, 1.25f) +
+                  0.32f * score_up(w.acc_delta_mean, 0.150f, 0.330f) +
+                  0.14f * score_up(w.acc_range, 1.65f, 4.60f) +
+                  0.06f * score_up(w.gyro_mean, 105.0f, 295.0f) +
+                  0.04f * score_up(w.gyro_std, 80.0f, 195.0f);
+
+    /* 极端翻滚/拿起会让姿态变化非常大，只做轻微扣分，不再因为 burst 高直接归零。 */
+    w.run_score -= 0.12f * score_up(w.posture_std, 185.0f, 260.0f);
     w.run_score = clampf_local(w.run_score, 0.0f, 100.0f);
 
     w.play_score = 0.32f * score_up(w.gyro_std, c->play_gyro_std_th * 0.65f, c->play_gyro_std_th * 1.45f) +
@@ -170,26 +182,26 @@ behavior_window_t build_window_feature(pet_behavior_handle_t h, uint32_t now_ms)
         (w.acc_std >= 0.16f || w.acc_delta_mean >= 0.055f || w.burst_score >= 65.0f);
 
     /*
-     * v6 RUN 判断：
-     * - 不能靠单次 gyro/转头触发；
-     * - 必须有明显身体运动 acc_std/acc_delta；
-     * - rhythm_score 不能太低，避免把 PLAY/甩头当 RUN。
+     * v12 RUN 判断：
+     * - 单个 1 秒窗口只给 RUN candidate；
+     * - 最终 RUN 仍由 7 秒历史、至少 5 个 RUN candidate 决定；
+     * - 楼道 WALK 会有高 gyro，但身体运动不够连续，因此 gyro 不能单独推 RUN；
+     * - 必须 acc_std/acc_delta/acc_range 至少两项明显高，再让 gyro 做辅助。
      */
     bool run_body_motion =
-        (w.acc_std >= c->run_acc_std_th && w.acc_delta_mean >= 0.085f) ||
-        (w.acc_axis_std >= 0.42f && w.acc_delta_mean >= c->run_acc_delta_th) ||
-        (w.acc_range >= 0.48f && w.acc_std >= 0.240f);
+        (w.acc_std >= c->run_acc_std_th && w.acc_delta_mean >= c->run_acc_delta_th) ||
+        (w.acc_range >= 2.45f && w.acc_std >= 0.64f && w.acc_delta_mean >= 0.160f) ||
+        (w.acc_axis_std >= 0.92f && w.acc_delta_mean >= 0.170f);
 
     bool run_gyro_support =
         w.gyro_mean >= c->run_gyro_mean_th ||
-        w.gyro_std >= 62.0f;
+        w.gyro_std >= 100.0f;
 
     bool run_like =
-        w.run_score >= 64.0f &&
-        w.rhythm_score >= 32.0f &&
-        w.irregular_score < 75.0f &&
+        w.run_score >= 56.0f &&
+        w.activity_score >= 74.0f &&
         run_body_motion &&
-        (run_gyro_support || w.activity_score >= 66.0f);
+        run_gyro_support;
 
     bool trot_like =
         !run_like &&

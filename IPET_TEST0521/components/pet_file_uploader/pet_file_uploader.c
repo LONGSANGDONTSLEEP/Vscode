@@ -12,8 +12,10 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 
 #include "pet_data_logger.h"
+#include "wifi_manager.h"
 
 #define TAG "FILE_UP"
 
@@ -24,10 +26,18 @@
 
 static TaskHandle_t s_task = NULL;
 static bool s_ready = false;
+static volatile bool s_scan_now = false;
+static uint32_t s_last_success_ms = 0;
 
 static char s_url[URL_MAX_LEN];
 static uint32_t s_scan_interval_ms = 60000;
-static uint32_t s_timeout_ms = 5000;
+static uint32_t s_timeout_ms = 30000;
+
+static uint32_t uploader_now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
 
 static esp_err_t mkdir_if_needed(const char *path)
 {
@@ -72,15 +82,16 @@ static bool parse_segment_file(const char *name, char *type_out, uint32_t *seg_o
 
     /*
      * 文件名格式：
-     * S000001.CSV
-     * E000001.CSV
+     * S000001.CSV 状态窗口
+     * E000001.CSV 事件
+     * R000001.CSV 高频 raw IMU，录制测试时最重要
      */
     if (!str_ends_with_csv(name)) {
         return false;
     }
 
     char type = toupper((unsigned char)name[0]);
-    if (type != 'S' && type != 'E') {
+    if (type != 'S' && type != 'E' && type != 'R') {
         return false;
     }
 
@@ -101,6 +112,24 @@ static bool parse_segment_file(const char *name, char *type_out, uint32_t *seg_o
     *type_out = type;
     *seg_out = seg;
     return true;
+}
+
+static bool segment_is_safe_to_upload(char type, uint32_t seg, uint32_t current_seg)
+{
+    /*
+     * S/E 当前分段仍可能正在写，必须等 seg < current_seg。
+     * R 高频 raw 文件不同：网页结束录制后 raw logger 会关闭，
+     * 此时即使 R 的编号等于 current_seg，也已经是完整文件，可以立刻上传。
+     */
+    if (seg < current_seg) {
+        return true;
+    }
+
+    if (type == 'R' && seg == current_seg && !pet_data_logger_raw_is_enabled()) {
+        return true;
+    }
+
+    return false;
 }
 
 static void make_session_relative(const char *session_dir, char *out, size_t out_len)
@@ -160,7 +189,7 @@ static esp_err_t post_file(const char *path, const char *file_name, const char *
         return ret;
     }
 
-    char buf[512];
+    char buf[1024];
     size_t read_len;
 
     while ((read_len = fread(buf, 1, sizeof(buf), f)) > 0) {
@@ -187,6 +216,7 @@ static esp_err_t post_file(const char *path, const char *file_name, const char *
                      file_name,
                      (long)st.st_size,
                      status);
+            s_last_success_ms = uploader_now_ms();
             ret = ESP_OK;
         } else {
             ESP_LOGW(TAG, "upload failed HTTP status=%d file=%s", status, file_name);
@@ -248,6 +278,9 @@ static void scan_and_upload_once(void)
     }
 
     uint32_t current_seg = pet_data_logger_get_current_segment();
+    uint32_t found_files = 0;
+    uint32_t skipped_current = 0;
+    uint32_t tried_files = 0;
 
     DIR *dir = opendir(session_dir);
     if (!dir) {
@@ -268,11 +301,15 @@ static void scan_and_upload_once(void)
             continue;
         }
 
+        found_files++;
+
         /*
-         * 当前正在写的 segment 不上传。
-         * 只上传已经完成的旧 segment。
+         * 当前正在写的 S/E segment 不上传，避免边写边传导致 CSV 不完整。
+         * 但 R 高频 raw 文件在录制结束后会关闭；关闭后即使编号等于
+         * current_seg，也应该立即上传，否则网页上看不到 R000xxx.CSV。
          */
-        if (seg >= current_seg) {
+        if (!segment_is_safe_to_upload(type, seg, current_seg)) {
+            skipped_current++;
             continue;
         }
 
@@ -288,6 +325,7 @@ static void scan_and_upload_once(void)
             continue;
         }
 
+        tried_files++;
         esp_err_t ret = post_file(path, ent->d_name, session_rel);
         if (ret == ESP_OK) {
             move_to_sent(session_dir, path, ent->d_name);
@@ -302,6 +340,16 @@ static void scan_and_upload_once(void)
     }
 
     closedir(dir);
+
+    if (found_files > 0 && tried_files == 0) {
+        ESP_LOGI(TAG,
+                 "scan: session=%s current_seg=%lu raw_enabled=%d files=%lu skipped_current=%lu",
+                 session_dir,
+                 (unsigned long)current_seg,
+                 pet_data_logger_raw_is_enabled() ? 1 : 0,
+                 (unsigned long)found_files,
+                 (unsigned long)skipped_current);
+    }
 }
 
 static void uploader_task(void *arg)
@@ -309,11 +357,32 @@ static void uploader_task(void *arg)
     ESP_LOGI(TAG, "file uploader task started, url=%s", s_url);
 
     while (1) {
+        if (!wifi_manager_is_connected()) {
+            /*
+             * 网络断开时不要反复打开 HTTP，保留 CSV 文件，等 Wi-Fi 恢复后继续上传。
+             */
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+
         if (pet_data_logger_is_ready()) {
             scan_and_upload_once();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(s_scan_interval_ms));
+        uint32_t waited = 0;
+        while (waited < s_scan_interval_ms) {
+            if (s_scan_now) {
+                s_scan_now = false;
+                break;
+            }
+            uint32_t step = 250;
+            uint32_t remain = s_scan_interval_ms - waited;
+            if (step > remain) {
+                step = remain;
+            }
+            vTaskDelay(pdMS_TO_TICKS(step));
+            waited += step;
+        }
     }
 }
 
@@ -331,7 +400,11 @@ esp_err_t pet_file_uploader_start(const pet_file_uploader_config_t *cfg)
     snprintf(s_url, sizeof(s_url), "%s", cfg->url);
 
     s_scan_interval_ms = cfg->scan_interval_ms ? cfg->scan_interval_ms : 60000;
-    s_timeout_ms = cfg->timeout_ms ? cfg->timeout_ms : 5000;
+    if (s_scan_interval_ms < 1000) {
+        s_scan_interval_ms = 1000;
+    }
+    s_timeout_ms = cfg->timeout_ms ? cfg->timeout_ms : 30000;
+    s_scan_now = true;
 
     uint32_t stack_size = cfg->task_stack_size ? cfg->task_stack_size : 6144;
     uint32_t priority = cfg->task_priority ? cfg->task_priority : 3;
@@ -363,6 +436,7 @@ esp_err_t pet_file_uploader_start(const pet_file_uploader_config_t *cfg)
 esp_err_t pet_file_uploader_stop(void)
 {
     s_ready = false;
+    s_scan_now = false;
 
     if (s_task) {
         vTaskDelete(s_task);
@@ -376,4 +450,18 @@ esp_err_t pet_file_uploader_stop(void)
 bool pet_file_uploader_is_ready(void)
 {
     return s_ready;
+}
+void pet_file_uploader_request_scan_now(void)
+{
+    /*
+     * Called by recording stop / log rotate paths to wake the uploader quickly.
+     * The uploader task checks this flag every 250 ms while waiting for the
+     * normal scan interval, so this does not need a semaphore or queue.
+     */
+    s_scan_now = true;
+}
+
+uint32_t pet_file_uploader_last_success_ms(void)
+{
+    return s_last_success_ms;
 }

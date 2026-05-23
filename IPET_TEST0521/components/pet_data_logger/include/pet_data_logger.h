@@ -24,6 +24,13 @@ esp_err_t pet_data_logger_write_event(uint32_t now_ms, const pet_behavior_result
  */
 esp_err_t pet_data_logger_set_raw_enabled(bool enabled);
 bool pet_data_logger_raw_is_enabled(void);
+
+/**
+ * @brief 结束一次 raw 录制：关闭 Rxxxxxx.CSV，并强制切到下一段。
+ *
+ * 这样刚结束的 R/S/E 文件不再是 current segment，文件上传器可以立刻上传。
+ */
+esp_err_t pet_data_logger_finish_raw_recording(void);
 esp_err_t pet_data_logger_write_raw_sample(uint32_t now_ms,
                                            const qmi8658a_sample_t *sample,
                                            const pet_behavior_result_t *result);

@@ -11,11 +11,16 @@
 #include "pet_data_logger.h"
 #include "pet_telemetry.h"
 #include "pet_file_uploader.h"
+#include "pet_power_led.h"
 
 #define TAG "PET_MON"
 
 /* 终端只看稳定后的当前状态，不打印 candidate/raw/debug，避免误解短窗口抖动。 */
 #define PET_TERMINAL_STATE_REPORT_MS 5000
+#define PET_HTTP_STATE_REPORT_DEFAULT_MS 1000
+#define PET_HTTP_STATE_REPORT_MIN_MS 500
+#define PET_HTTP_STATE_REPORT_MAX_MS 10000
+#define PET_RECORDING_HTTP_STATE_REPORT_MS 1000
 
 static qmi8658a_handle_t s_imu;
 static pet_behavior_handle_t s_behavior;
@@ -41,7 +46,9 @@ static void pet_monitor_task(void *arg)
     qmi8658a_sample_t sample;
     pet_behavior_result_t result;
     uint32_t last_user_report_ms = 0;
+    uint32_t last_http_report_ms = 0;
     pet_state_t last_print_state = PET_STATE_UNKNOWN;
+    pet_state_t last_http_state = PET_STATE_UNKNOWN;
 
     /*
      * 初始化 SD 卡数据记录器。
@@ -96,7 +103,7 @@ static void pet_monitor_task(void *arg)
 
     /*
      * 初始化 CSV 文件上传器。
-     * 它会上传已经轮转完成的 Sxxxxxx.CSV / Exxxxxx.CSV。
+     * 它会上传已经轮转完成的 Sxxxxxx.CSV / Exxxxxx.CSV / Rxxxxxx.CSV。
      * 当前正在写的分段不会上传。
      */
     if (s_logger_ready &&
@@ -110,7 +117,7 @@ static void pet_monitor_task(void *arg)
             .scan_interval_ms = s_cfg.file_upload_scan_interval_ms ? s_cfg.file_upload_scan_interval_ms : 60000,
             .task_stack_size = 6144,
             .task_priority = 3,
-            .timeout_ms = 5000,
+            .timeout_ms = 30000,
         };
 
         esp_err_t up_ret = pet_file_uploader_start(&file_cfg);
@@ -175,6 +182,7 @@ static void pet_monitor_task(void *arg)
             bool changed = pet_behavior_update(s_behavior, &sample, t, &result);
             s_last_result = result;
             s_have_result = true;
+            pet_power_led_set_behavior_state(result.state);
 
             /*
              * pet_behavior_update() 返回 true 时，通常代表一个状态窗口结束，
@@ -182,16 +190,33 @@ static void pet_monitor_task(void *arg)
              */
             if (changed)
             {
-                bool state_changed = (result.state != last_print_state);
-                bool time_to_report = (t - last_user_report_ms) >= PET_TERMINAL_STATE_REPORT_MS;
-                bool should_report_user_state = s_recording_mode || state_changed || time_to_report;
+                bool terminal_state_changed = (result.state != last_print_state);
+                bool time_to_terminal_report = (t - last_user_report_ms) >= PET_TERMINAL_STATE_REPORT_MS;
+                bool should_report_terminal_state = terminal_state_changed || time_to_terminal_report;
+
+                uint32_t http_interval_ms = s_cfg.http_report_interval_ms;
+                if (http_interval_ms == 0) {
+                    http_interval_ms = PET_HTTP_STATE_REPORT_DEFAULT_MS;
+                }
+                if (http_interval_ms < PET_HTTP_STATE_REPORT_MIN_MS) {
+                    http_interval_ms = PET_HTTP_STATE_REPORT_MIN_MS;
+                }
+                if (http_interval_ms > PET_HTTP_STATE_REPORT_MAX_MS) {
+                    http_interval_ms = PET_HTTP_STATE_REPORT_MAX_MS;
+                }
+                if (s_recording_mode && http_interval_ms > PET_RECORDING_HTTP_STATE_REPORT_MS) {
+                    http_interval_ms = PET_RECORDING_HTTP_STATE_REPORT_MS;
+                }
+
+                bool http_state_changed = (result.state != last_http_state);
+                bool time_to_http_report = (t - last_http_report_ms) >= http_interval_ms;
+                bool should_report_http_state = http_state_changed || time_to_http_report;
 
                 /*
-                 * 终端只显示“用户真正需要看的当前状态”。
-                 * candidate/raw_state/score 仍然会写入 SD 卡 CSV，便于后续调参；
-                 * 但不再每秒刷一堆内部字段，避免测试时看起来很乱。
+                 * 终端仍然慢一点，只显示“用户真正需要看的当前状态”。
+                 * /pet HTTP 心跳单独按 1 秒左右发送，避免网页显示“上次联系几秒前”。
                  */
-                if (should_report_user_state)
+                if (should_report_terminal_state)
                 {
                     ESP_LOGI(TAG,
                              "current_state=%s%s",
@@ -227,10 +252,15 @@ static void pet_monitor_task(void *arg)
                  * HTTP 上传只入队，不直接阻塞 pet_monitor。
                  * 如果 Wi-Fi 断开或电脑服务没开，上传失败也不会影响 SD 卡记录。
                  */
-                if (s_telemetry_ready && should_report_user_state)
+                if (s_telemetry_ready && should_report_http_state)
                 {
                     esp_err_t ret = pet_telemetry_enqueue_state(t, &result);
-                    if (ret != ESP_OK)
+                    if (ret == ESP_OK)
+                    {
+                        last_http_report_ms = t;
+                        last_http_state = result.state;
+                    }
+                    else
                     {
                         ESP_LOGW(TAG, "enqueue telemetry failed: %s", esp_err_to_name(ret));
                     }
@@ -366,14 +396,40 @@ esp_err_t pet_collar_monitor_set_recording_mode(bool enabled,
         sample_period_ms = 20;
     }
 
-    s_recording_sample_period_ms = sample_period_ms;
-    s_raw_sample_log = raw_sample_log;
-    s_recording_mode = enabled;
+    bool was_recording = s_recording_mode;
 
-    if (s_logger_ready) {
-        esp_err_t ret = pet_data_logger_set_raw_enabled(enabled && raw_sample_log);
-        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "set raw logger failed: %s", esp_err_to_name(ret));
+    s_recording_sample_period_ms = sample_period_ms;
+
+    if (enabled) {
+        s_raw_sample_log = raw_sample_log;
+        s_recording_mode = true;
+
+        if (s_logger_ready) {
+            esp_err_t ret = pet_data_logger_set_raw_enabled(raw_sample_log);
+            if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "set raw logger failed: %s", esp_err_to_name(ret));
+            }
+        }
+    } else {
+        /*
+         * 结束录制时一定要关闭并轮转 raw 文件。
+         * 否则 Rxxxxxx.CSV 仍然是 current segment，上传器会跳过它，
+         * 网页下载的录制 zip 里就没有真实 gx/gy/gz raw 数据。
+         */
+        s_recording_mode = false;
+        s_raw_sample_log = false;
+
+        if (s_logger_ready && was_recording) {
+            esp_err_t ret = pet_data_logger_finish_raw_recording();
+            if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "finish raw recording failed: %s", esp_err_to_name(ret));
+            }
+            if (s_file_uploader_ready) {
+                ESP_LOGI(TAG, "recording stopped, request immediate CSV upload scan");
+                pet_file_uploader_request_scan_now();
+            }
+        } else if (s_logger_ready) {
+            pet_data_logger_set_raw_enabled(false);
         }
     }
 
@@ -388,6 +444,14 @@ esp_err_t pet_collar_monitor_set_recording_mode(bool enabled,
 bool pet_collar_monitor_is_recording_mode(void)
 {
     return s_recording_mode;
+}
+
+void pet_collar_monitor_request_file_upload(void)
+{
+    if (s_file_uploader_ready) {
+        ESP_LOGI(TAG, "request immediate CSV upload scan");
+        pet_file_uploader_request_scan_now();
+    }
 }
 
 esp_err_t pet_collar_monitor_stop(void)

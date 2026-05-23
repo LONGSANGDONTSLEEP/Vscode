@@ -12,11 +12,13 @@
 #include "freertos/task.h"
 
 #include "pet_time.h"
+#include "pet_power_led.h"
+#include "sd_card_mgr.h"
 
 #define TAG "PET_HTTP"
 
 #define PET_TELEMETRY_URL_MAX_LEN   160
-#define PET_TELEMETRY_JSON_MAX_LEN  512
+#define PET_TELEMETRY_JSON_MAX_LEN  1024
 
 /*
  * 上传频率控制：
@@ -210,10 +212,16 @@ static void update_backoff_after_post(esp_err_t ret)
             ESP_LOGI(TAG, "network recovered, reset backoff");
         }
 
+        /* /pet 能成功发到电脑端，第二颗系统灯显示在线绿闪。 */
+        pet_power_led_set_server_reachable(true);
+
         s_consecutive_failures = 0;
         s_next_attempt_ms = 0;
         return;
     }
+
+    /* WiFi 可能还连着，但电脑服务不可达或发送失败；系统灯同样显示红色。 */
+    pet_power_led_set_server_reachable(false);
 
     s_consecutive_failures++;
 
@@ -240,24 +248,86 @@ static void make_json(uint32_t now_ms,
      * 实时终端/HTTP 只发送稳定后的当前状态。
      * candidate/raw_state/acc/gyro 等详细调试字段仍写入 SD CSV，避免终端刷屏。
      */
-    snprintf(buf,
-             buf_len,
-             "{"
-             "\"boot_id\":\"%08lx\","
-             "\"time_ms\":%llu,"
-             "\"epoch_ms\":%lld,"
-             "\"time_valid\":%d,"
-             "\"time_str\":\"%s\","
-             "\"state\":\"%s\","
-             "\"state_duration_ms\":%lu"
-             "}",
-             (unsigned long)ts.boot_id,
-             (unsigned long long)ts.time_ms,
-             (long long)ts.epoch_ms,
-             ts.time_valid ? 1 : 0,
-             ts.time_str,
-             pet_state_to_str(r->state),
-             (unsigned long)r->state_duration_ms);
+    pet_power_led_status_t led;
+    bool led_ok = pet_power_led_get_status(&led);
+
+    bool sd_mounted = sd_card_mgr_is_mounted();
+    const char *sd_mount = sd_card_mgr_mount_point();
+    if (sd_mount == NULL || sd_mount[0] == '\0') {
+        sd_mount = "/sdcard";
+    }
+    const char *sd_status_name = sd_mounted ? "MOUNTED" : "NOT_MOUNTED";
+
+    if (led_ok) {
+        snprintf(buf,
+                 buf_len,
+                 "{"
+                 "\"boot_id\":\"%08lx\","
+                 "\"time_ms\":%llu,"
+                 "\"epoch_ms\":%lld,"
+                 "\"time_valid\":%d,"
+                 "\"time_str\":\"%s\","
+                 "\"state\":\"%s\","
+                 "\"state_duration_ms\":%lu,"
+                 "\"state_led_name\":\"%s\","
+                 "\"state_led_rgb\":\"%s\","
+                 "\"system_led_name\":\"%s\","
+                 "\"system_led_rgb\":\"%s\","
+                 "\"system_led_mode\":\"%s\","
+                 "\"network_online\":%d,"
+                 "\"recording_active\":%d,"
+                 "\"ota_active\":%d,"
+                 "\"power_key_led_override\":%d,"
+                 "\"sd_mounted\":%d,"
+                 "\"sd_status_name\":\"%s\","
+                 "\"sd_mount_point\":\"%s\""
+                 "}",
+                 (unsigned long)ts.boot_id,
+                 (unsigned long long)ts.time_ms,
+                 (long long)ts.epoch_ms,
+                 ts.time_valid ? 1 : 0,
+                 ts.time_str,
+                 pet_state_to_str(r->state),
+                 (unsigned long)r->state_duration_ms,
+                 led.state_led_name,
+                 led.state_led_hex,
+                 led.system_led_name,
+                 led.system_led_hex,
+                 pet_power_led_system_mode_to_str(led.system_mode),
+                 led.network_online ? 1 : 0,
+                 led.recording_active ? 1 : 0,
+                 led.ota_active ? 1 : 0,
+                 led.power_key_override ? 1 : 0,
+                 sd_mounted ? 1 : 0,
+                 sd_status_name,
+                 sd_mount);
+    } else {
+        snprintf(buf,
+                 buf_len,
+                 "{"
+                 "\"boot_id\":\"%08lx\","
+                 "\"time_ms\":%llu,"
+                 "\"epoch_ms\":%lld,"
+                 "\"time_valid\":%d,"
+                 "\"time_str\":\"%s\","
+                 "\"state\":\"%s\","
+                 "\"state_duration_ms\":%lu,"
+                 "\"system_led_mode\":\"UNKNOWN\","
+                 "\"sd_mounted\":%d,"
+                 "\"sd_status_name\":\"%s\","
+                 "\"sd_mount_point\":\"%s\""
+                 "}",
+                 (unsigned long)ts.boot_id,
+                 (unsigned long long)ts.time_ms,
+                 (long long)ts.epoch_ms,
+                 ts.time_valid ? 1 : 0,
+                 ts.time_str,
+                 pet_state_to_str(r->state),
+                 (unsigned long)r->state_duration_ms,
+                 sd_mounted ? 1 : 0,
+                 sd_status_name,
+                 sd_mount);
+    }
 }
 
 static void telemetry_task(void *arg)

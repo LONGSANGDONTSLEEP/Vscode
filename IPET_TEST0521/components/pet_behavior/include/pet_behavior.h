@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define PET_BEHAVIOR_ALGO_VERSION "v6.2.0-fast-not-worn"
+#define PET_BEHAVIOR_ALGO_VERSION "v12.0.0-walk-run-guard"
 #define PET_BEHAVIOR_HISTORY_MAX 8
 
 typedef enum {
@@ -44,7 +44,7 @@ typedef struct {
      * 3) 再结合最近 history_window_count 个短窗口做最终判断。
      */
     uint32_t window_ms;             // 推荐 1000ms
-    uint8_t history_window_count;   // 推荐 5；最大 PET_BEHAVIOR_HISTORY_MAX
+    uint8_t history_window_count;   // v10 默认 5：约 5 秒综合判断；最大 PET_BEHAVIOR_HISTORY_MAX
     uint32_t min_state_hold_ms;     // 兜底防抖，推荐 2000~3000ms
     uint32_t terminal_report_interval_ms; // 终端/HTTP 慢速上报间隔，推荐 5000ms
 
@@ -115,7 +115,7 @@ typedef struct {
 
     // 长时间判断
     // not_worn_after_rest_ms 基于“超静止”计时；sleep_after_rest_ms 基于普通 REST 计时。
-    // v6.2 默认更快：放下后约 20 秒超静止即可进入 NOT_WORN。
+    // v10：NOT_WORN 约 20 秒超静止；SLEEP 默认约 90 秒安静但非超静止。
     uint32_t sleep_after_rest_ms;
     uint32_t not_worn_after_rest_ms;
 } pet_behavior_config_t;

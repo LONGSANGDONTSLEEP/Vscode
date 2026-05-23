@@ -33,6 +33,12 @@ typedef struct {
      */
     char record_command_url[PET_CONFIG_URL_MAX_LEN];
 
+    /*
+     * 远程 SD 卡管理命令地址。
+     * 网页可通过它请求设备列出、上传或删除 /sdcard 文件。
+     */
+    char sd_command_url[PET_CONFIG_URL_MAX_LEN];
+
     bool enable_json_upload;
     bool enable_file_upload;
 
@@ -42,13 +48,26 @@ typedef struct {
     /* 是否允许网页远程控制高频录制模式。 */
     bool enable_remote_record;
 
+    /* 是否允许网页浏览、下载、删除 SD 卡文件。 */
+    bool enable_remote_sd;
+
     uint32_t file_upload_scan_ms;
+
+    /* /pet 当前状态上传间隔。建议 1000ms，避免网页显示“上次联系几秒前”。 */
+    uint32_t json_upload_interval_ms;
 
     /* 远程 OTA 命令轮询间隔，建议 3000~10000ms。 */
     uint32_t ota_command_poll_ms;
 
     /* 远程录制命令轮询间隔，录制控制建议 1000~2000ms。 */
     uint32_t record_command_poll_ms;
+
+    /* 远程 SD 卡管理命令轮询间隔。 */
+    uint32_t sd_command_poll_ms;
+
+    /* LED 配置。第一颗显示行为，第二颗显示系统/连接/录制/OTA 状态。 */
+    uint32_t led_brightness;
+    uint32_t system_led_period_ms;
 } pet_config_t;
 
 /**

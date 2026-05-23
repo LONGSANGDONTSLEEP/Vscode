@@ -19,9 +19,10 @@
  * 调试阶段可以改成 1 分钟：
  * #define LOG_ROTATE_INTERVAL_MS (1 * 60 * 1000ULL)
  *
- * 正常测试建议 3~5 分钟。
+ * 现在调试阶段需要更快把 CSV 上传到电脑，默认 60 秒轮转一次。
+ * 文件上传器只上传已经轮转完成的 segment，所以这里不能太长。
  */
-#define LOG_ROTATE_INTERVAL_MS (3 * 60 * 1000ULL)
+#define LOG_ROTATE_INTERVAL_MS (60 * 1000ULL)
 
 static bool s_ready = false;
 
@@ -476,6 +477,24 @@ esp_err_t pet_data_logger_set_raw_enabled(bool enabled)
 bool pet_data_logger_raw_is_enabled(void)
 {
     return s_raw_enabled;
+}
+
+esp_err_t pet_data_logger_finish_raw_recording(void)
+{
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* 先关闭 raw 文件，确保 Rxxxxxx.CSV flush 到 SD 卡。 */
+    s_raw_enabled = false;
+    close_raw_file();
+    s_raw_last_flush_ms = 0;
+
+    /*
+     * 强制切到下一段，让刚结束的 S/E/R 文件编号 < current_segment。
+     * pet_file_uploader 才会把这次录制的数据上传到网页端。
+     */
+    return pet_data_logger_force_rotate();
 }
 
 esp_err_t pet_data_logger_write_raw_sample(uint32_t now_ms,

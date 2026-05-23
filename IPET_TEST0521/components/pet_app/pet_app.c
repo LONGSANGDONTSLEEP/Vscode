@@ -18,6 +18,8 @@
 #include "pet_behavior.h"
 #include "pet_collar_monitor.h"
 #include "pet_config.h"
+#include "pet_power_led.h"
+#include "pet_sd_remote.h"
 #include "pet_time.h"
 #include "qmi8658a.h"
 #include "wifi_manager.h"
@@ -34,24 +36,36 @@
 #define PET_APP_RECORD_HTTP_TIMEOUT_MS 1500U
 #define PET_APP_REMOTE_RECORD_STACK_SIZE 4096U
 #define PET_APP_REMOTE_RECORD_TASK_PRIORITY 3U
+#define PET_APP_REMOTE_SD_STACK_SIZE 8192U
+#define PET_APP_REMOTE_SD_TASK_PRIORITY 3U
 
 #define PET_APP_WIFI_TIMEOUT_MS 15000U
 #define PET_APP_NTP_TIMEOUT_MS 10000U
 #define PET_APP_HTTP_TIMEOUT_MS 2000U
+#define PET_APP_JSON_UPLOAD_INTERVAL_MS 1000U
+#define PET_APP_JSON_UPLOAD_INTERVAL_MIN_MS 500U
+#define PET_APP_JSON_UPLOAD_INTERVAL_MAX_MS 10000U
 #define PET_APP_HEARTBEAT_PERIOD_MS 30000U
 #define PET_APP_MONITOR_SAMPLE_PERIOD_MS 20U
 #define PET_APP_MONITOR_STACK_SIZE 4096U
 #define PET_APP_MONITOR_TASK_PRIORITY 5U
 #define PET_APP_HEARTBEAT_STACK_SIZE 3072U
 #define PET_APP_HEARTBEAT_TASK_PRIORITY 2U
+#define PET_APP_NETWORK_STACK_SIZE 4096U
+#define PET_APP_NETWORK_TASK_PRIORITY 3U
+#define PET_APP_NETWORK_CHECK_MS 10000U
+#define PET_APP_NETWORK_RECONNECT_MS 15000U
 
 static pet_config_t s_app_cfg;
 static TaskHandle_t s_heartbeat_task;
 static TaskHandle_t s_remote_ota_task;
 static TaskHandle_t s_remote_record_task;
+static bool s_remote_sd_started;
+static TaskHandle_t s_network_task;
 static SemaphoreHandle_t s_ota_lock;
 static volatile bool s_ota_in_progress;
 static bool s_started;
+static volatile bool s_network_online;
 static char s_last_ota_id[PET_APP_OTA_ID_MAX_LEN];
 static char s_last_record_id[PET_APP_RECORD_ID_MAX_LEN];
 
@@ -71,10 +85,14 @@ static bool pet_app_connect_wifi_for_telemetry(void)
 {
     ESP_LOGI(TAG, "connecting WiFi for telemetry...");
 
-    if (!wifi_manager_connect_blocking(s_app_cfg.wifi_ssid,
-                                       s_app_cfg.wifi_pass,
-                                       PET_APP_WIFI_TIMEOUT_MS)) {
-        ESP_LOGW(TAG, "WiFi connect failed, telemetry will be unavailable");
+    bool ok = wifi_manager_connect_blocking(s_app_cfg.wifi_ssid,
+                                            s_app_cfg.wifi_pass,
+                                            PET_APP_WIFI_TIMEOUT_MS);
+    s_network_online = ok;
+
+    if (!ok) {
+        ESP_LOGW(TAG,
+                 "WiFi initial connect failed, but auto reconnect will keep running");
         return false;
     }
 
@@ -298,6 +316,7 @@ static void pet_app_ota_job_task(void *arg)
     }
 
     ESP_LOGW(TAG, "OTA task running: id=%s url=%s", job->id, job->url);
+    pet_power_led_set_ota_active(true);
 
     ota_update_config_t cfg = {
         .url = job->url,
@@ -323,6 +342,7 @@ static void pet_app_ota_job_task(void *arg)
     } else {
         s_ota_in_progress = false;
     }
+    pet_power_led_set_ota_active(false);
 
     free(job);
     vTaskDelete(NULL);
@@ -348,6 +368,7 @@ static void pet_app_start_ota_url(const char *url, const char *id)
     }
 
     s_ota_in_progress = true;
+    pet_power_led_set_ota_active(true);
 
     if (id && id[0] != '\0') {
         snprintf(s_last_ota_id, sizeof(s_last_ota_id), "%s", id);
@@ -361,6 +382,7 @@ static void pet_app_start_ota_url(const char *url, const char *id)
     if (!job) {
         ESP_LOGE(TAG, "OTA job alloc failed");
         s_ota_in_progress = false;
+        pet_power_led_set_ota_active(false);
         return;
     }
 
@@ -379,6 +401,7 @@ static void pet_app_start_ota_url(const char *url, const char *id)
         ESP_LOGE(TAG, "OTA job task create failed");
         free(job);
         s_ota_in_progress = false;
+        pet_power_led_set_ota_active(false);
     }
 }
 
@@ -444,6 +467,11 @@ static void pet_app_remote_ota_task(void *arg)
              (unsigned long)poll_ms);
 
     while (1) {
+        if (!wifi_manager_is_connected()) {
+            vTaskDelay(pdMS_TO_TICKS(poll_ms));
+            continue;
+        }
+
         if (!s_ota_in_progress) {
             esp_err_t ret = pet_app_get_ota_command(id, sizeof(id), url, sizeof(url));
             if (ret == ESP_OK && url[0] != '\0') {
@@ -461,10 +489,7 @@ static void pet_app_remote_ota_task(void *arg)
 
 static esp_err_t pet_app_start_remote_ota(bool wifi_ok)
 {
-    if (!wifi_ok) {
-        ESP_LOGW(TAG, "remote OTA disabled because WiFi is not connected");
-        return ESP_OK;
-    }
+    (void)wifi_ok;
 
     if (!s_app_cfg.enable_remote_ota) {
         ESP_LOGI(TAG, "remote OTA disabled by config");
@@ -506,9 +531,10 @@ static esp_err_t pet_app_get_record_command(char *id,
                                             size_t id_size,
                                             bool *enabled,
                                             uint32_t *sample_period_ms,
-                                            bool *raw_log)
+                                            bool *raw_log,
+                                            bool *upload_now)
 {
-    if (!id || id_size == 0 || !enabled || !sample_period_ms || !raw_log) {
+    if (!id || id_size == 0 || !enabled || !sample_period_ms || !raw_log || !upload_now) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -516,6 +542,7 @@ static esp_err_t pet_app_get_record_command(char *id,
     *enabled = false;
     *sample_period_ms = 5;
     *raw_log = true;
+    *upload_now = false;
 
     esp_http_client_config_t config = {
         .url = s_app_cfg.record_command_url,
@@ -585,6 +612,7 @@ static esp_err_t pet_app_get_record_command(char *id,
     *enabled = json_bool_or_int_true(body, "record");
     *sample_period_ms = json_u32_value(body, "sample_period_ms", 5);
     *raw_log = json_has_key(body, "raw") ? json_bool_or_int_true(body, "raw") : true;
+    *upload_now = json_has_key(body, "upload_now") ? json_bool_or_int_true(body, "upload_now") : false;
 
     return ESP_OK;
 }
@@ -596,6 +624,7 @@ static void pet_app_remote_record_task(void *arg)
     char id[PET_APP_RECORD_ID_MAX_LEN];
     bool enabled = false;
     bool raw_log = true;
+    bool upload_now = false;
     uint32_t sample_period_ms = 5;
 
     uint32_t poll_ms = s_app_cfg.record_command_poll_ms;
@@ -609,11 +638,17 @@ static void pet_app_remote_record_task(void *arg)
              (unsigned long)poll_ms);
 
     while (1) {
+        if (!wifi_manager_is_connected()) {
+            vTaskDelay(pdMS_TO_TICKS(poll_ms));
+            continue;
+        }
+
         esp_err_t ret = pet_app_get_record_command(id,
                                                    sizeof(id),
                                                    &enabled,
                                                    &sample_period_ms,
-                                                   &raw_log);
+                                                   &raw_log,
+                                                   &upload_now);
         if (ret == ESP_OK && id[0] != '\0') {
             if (strcmp(id, s_last_record_id) != 0) {
                 snprintf(s_last_record_id, sizeof(s_last_record_id), "%s", id);
@@ -624,6 +659,14 @@ static void pet_app_remote_record_task(void *arg)
                          (unsigned long)sample_period_ms,
                          raw_log ? 1 : 0);
                 pet_collar_monitor_set_recording_mode(enabled, sample_period_ms, raw_log);
+                pet_power_led_set_recording_active(enabled);
+            }
+
+            if (upload_now) {
+                /* 网页结束录制后会带 upload_now=1。
+                 * 即使 id 没变化，也允许重复触发上传扫描，
+                 * 这样 R000xxx.CSV 会尽快 POST 到网页服务端。 */
+                pet_collar_monitor_request_file_upload();
             }
         }
 
@@ -633,10 +676,7 @@ static void pet_app_remote_record_task(void *arg)
 
 static esp_err_t pet_app_start_remote_record(bool wifi_ok)
 {
-    if (!wifi_ok) {
-        ESP_LOGW(TAG, "remote record disabled because WiFi is not connected");
-        return ESP_OK;
-    }
+    (void)wifi_ok;
 
     if (!s_app_cfg.enable_remote_record) {
         ESP_LOGI(TAG, "remote record disabled by config");
@@ -666,10 +706,93 @@ static esp_err_t pet_app_start_remote_record(bool wifi_ok)
     return ESP_OK;
 }
 
+static esp_err_t pet_app_start_remote_sd(bool wifi_ok)
+{
+    (void)wifi_ok;
+
+    if (!s_app_cfg.enable_remote_sd) {
+        ESP_LOGI(TAG, "remote SD browser disabled by config");
+        return ESP_OK;
+    }
+
+    if (s_app_cfg.sd_command_url[0] == '\0') {
+        ESP_LOGW(TAG, "remote SD browser disabled: empty SD_COMMAND_URL");
+        return ESP_OK;
+    }
+
+    if (s_remote_sd_started) {
+        return ESP_OK;
+    }
+
+    pet_sd_remote_config_t cfg = {
+        .command_url = s_app_cfg.sd_command_url,
+        .upload_url = s_app_cfg.pet_file_upload_url,
+        .poll_ms = s_app_cfg.sd_command_poll_ms ? s_app_cfg.sd_command_poll_ms : 2000,
+        .http_timeout_ms = 6000,
+        .task_stack_size = PET_APP_REMOTE_SD_STACK_SIZE,
+        .task_priority = PET_APP_REMOTE_SD_TASK_PRIORITY,
+    };
+
+    esp_err_t ret = pet_sd_remote_start(&cfg);
+    if (ret == ESP_OK) {
+        s_remote_sd_started = true;
+        ESP_LOGI(TAG, "remote SD browser started: %s", s_app_cfg.sd_command_url);
+    } else {
+        ESP_LOGW(TAG, "remote SD browser start failed: %s", esp_err_to_name(ret));
+    }
+
+    return ret;
+}
+
+
+static esp_err_t pet_app_start_power_led(void)
+{
+    pet_power_led_config_t led_cfg;
+    pet_power_led_default_config(&led_cfg);
+    if (s_app_cfg.led_brightness > 0 && s_app_cfg.led_brightness <= 255) {
+        led_cfg.led_brightness = (uint8_t)s_app_cfg.led_brightness;
+    }
+    if (s_app_cfg.system_led_period_ms >= 50 && s_app_cfg.system_led_period_ms <= 1000) {
+        led_cfg.system_led_period_ms = s_app_cfg.system_led_period_ms;
+    }
+
+    esp_err_t ret = pet_power_led_start(&led_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "behavior/system LED start failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "behavior/system LED started");
+    }
+    return ret;
+}
+
 static esp_err_t pet_app_start_monitor(bool wifi_ok)
 {
-    const bool enable_json = wifi_ok && s_app_cfg.enable_json_upload;
-    const bool enable_file = wifi_ok && s_app_cfg.enable_file_upload;
+    (void)wifi_ok;
+
+    /*
+     * 不再因为开机瞬间 Wi-Fi 没连上就永久关闭上传。
+     * telemetry/file_uploader 任务会先启动；网络没通时 HTTP 会失败并退避，
+     * Wi-Fi 自动重连成功后它们会自己恢复。
+     */
+    const bool enable_json = s_app_cfg.enable_json_upload && s_app_cfg.pet_http_url[0] != '\0';
+    const bool enable_file = s_app_cfg.enable_file_upload && s_app_cfg.pet_file_upload_url[0] != '\0';
+
+    uint32_t upload_scan_ms = s_app_cfg.file_upload_scan_ms;
+    if (s_app_cfg.enable_remote_record && upload_scan_ms > 5000) {
+        /* 测试录制时希望结束后尽快把 R/S/E CSV 上传到网页。 */
+        upload_scan_ms = 5000;
+    }
+
+    uint32_t json_upload_interval_ms = s_app_cfg.json_upload_interval_ms;
+    if (json_upload_interval_ms == 0) {
+        json_upload_interval_ms = PET_APP_JSON_UPLOAD_INTERVAL_MS;
+    }
+    if (json_upload_interval_ms < PET_APP_JSON_UPLOAD_INTERVAL_MIN_MS) {
+        json_upload_interval_ms = PET_APP_JSON_UPLOAD_INTERVAL_MIN_MS;
+    }
+    if (json_upload_interval_ms > PET_APP_JSON_UPLOAD_INTERVAL_MAX_MS) {
+        json_upload_interval_ms = PET_APP_JSON_UPLOAD_INTERVAL_MAX_MS;
+    }
 
     pet_collar_monitor_config_t cfg = {
         .bus = hwinit_get_i2c_bus(),
@@ -682,16 +805,18 @@ static esp_err_t pet_app_start_monitor(bool wifi_ok)
         .enable_http_upload = enable_json,
         .http_url = s_app_cfg.pet_http_url,
         .http_timeout_ms = PET_APP_HTTP_TIMEOUT_MS,
+        .http_report_interval_ms = json_upload_interval_ms,
 
         .enable_file_upload = enable_file,
         .file_upload_url = s_app_cfg.pet_file_upload_url,
-        .file_upload_scan_interval_ms = s_app_cfg.file_upload_scan_ms,
+        .file_upload_scan_interval_ms = upload_scan_ms,
     };
 
     ESP_LOGI(TAG,
-             "upload config: json=%d, file=%d",
+             "upload config: json=%d, file=%d, json_interval=%lu ms",
              enable_json ? 1 : 0,
-             enable_file ? 1 : 0);
+             enable_file ? 1 : 0,
+             (unsigned long)json_upload_interval_ms);
 
     esp_err_t ret = pet_collar_monitor_start(&cfg);
     if (ret != ESP_OK) {
@@ -701,6 +826,66 @@ static esp_err_t pet_app_start_monitor(bool wifi_ok)
 
     ESP_LOGI(TAG, "pet monitor started");
     return ESP_OK;
+}
+
+static void pet_app_network_task(void *arg)
+{
+    (void)arg;
+
+    uint32_t last_reconnect_ms = 0;
+    bool last_online = wifi_manager_is_connected();
+    s_network_online = last_online;
+    pet_power_led_set_network_online(last_online);
+
+    ESP_LOGI(TAG, "network supervisor started");
+
+    while (1) {
+        bool online = wifi_manager_is_connected();
+        uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
+        if (online && !last_online) {
+            ESP_LOGI(TAG, "WiFi recovered, HTTP upload/OTA/record polling will resume");
+        } else if (!online && last_online) {
+            ESP_LOGW(TAG, "WiFi lost, keep monitoring and reconnecting");
+        }
+
+        s_network_online = online;
+        pet_power_led_set_network_online(online);
+        last_online = online;
+
+        if (!online) {
+            if ((now_ms - last_reconnect_ms) >= PET_APP_NETWORK_RECONNECT_MS ||
+                last_reconnect_ms == 0) {
+                last_reconnect_ms = now_ms;
+                wifi_manager_reconnect_now();
+            }
+        } else {
+            last_reconnect_ms = now_ms;
+            if (!pet_time_is_valid()) {
+                esp_err_t ret = pet_time_sync_ntp(PET_APP_NTP_TIMEOUT_MS);
+                if (ret == ESP_OK) {
+                    ESP_LOGI(TAG, "NTP time sync success after reconnect");
+                }
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(PET_APP_NETWORK_CHECK_MS));
+    }
+}
+
+static esp_err_t pet_app_start_network_supervisor(void)
+{
+    if (s_network_task) {
+        return ESP_OK;
+    }
+
+    BaseType_t ok = xTaskCreate(pet_app_network_task,
+                                "net_watch",
+                                PET_APP_NETWORK_STACK_SIZE,
+                                NULL,
+                                PET_APP_NETWORK_TASK_PRIORITY,
+                                &s_network_task);
+    return ok == pdPASS ? ESP_OK : ESP_FAIL;
 }
 
 static void pet_app_heartbeat_task(void *arg)
@@ -764,11 +949,16 @@ esp_err_t pet_app_start(void)
     pet_time_init();
     pet_app_load_config();
 
+    esp_err_t power_led_ret = pet_app_start_power_led();
+
     bool wifi_ok = pet_app_connect_wifi_for_telemetry();
+    pet_power_led_set_network_online(wifi_ok);
 
     esp_err_t monitor_ret = pet_app_start_monitor(wifi_ok);
     esp_err_t remote_ota_ret = pet_app_start_remote_ota(wifi_ok);
     esp_err_t remote_record_ret = pet_app_start_remote_record(wifi_ok);
+    esp_err_t remote_sd_ret = pet_app_start_remote_sd(wifi_ok);
+    esp_err_t network_ret = pet_app_start_network_supervisor();
     esp_err_t button_ret = pet_app_register_ota_button();
     esp_err_t heartbeat_ret = pet_app_start_heartbeat();
 
@@ -777,6 +967,10 @@ esp_err_t pet_app_start(void)
 
     s_started = true;
 
+    if (power_led_ret != ESP_OK) {
+        /* LED 不应该阻断主功能。 */
+        ESP_LOGW(TAG, "continue without behavior/system LED: %s", esp_err_to_name(power_led_ret));
+    }
     if (monitor_ret != ESP_OK) {
         return monitor_ret;
     }
@@ -785,6 +979,12 @@ esp_err_t pet_app_start(void)
     }
     if (remote_record_ret != ESP_OK) {
         return remote_record_ret;
+    }
+    if (remote_sd_ret != ESP_OK) {
+        return remote_sd_ret;
+    }
+    if (network_ret != ESP_OK) {
+        return network_ret;
     }
     if (button_ret != ESP_OK) {
         return button_ret;

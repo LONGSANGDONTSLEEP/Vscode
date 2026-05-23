@@ -23,9 +23,10 @@
 #include "esp_err.h"
 #include <stdint.h>
 
-// 不直接包含 led_ctrl.h（避免组件 include 路径依赖），使用外部声明来调用需要的接口
+#include "pet_power_led.h"
+
+// 关机前最后淡出仍使用 led_ctrl 的阻塞淡出接口。
 extern void led_ctrl_shutdown_fade(void);
-extern void led_ctrl_set_led_color(int idx, uint8_t r, uint8_t g, uint8_t b);
 
 #define TAG "PWRKEEP"
 
@@ -287,12 +288,12 @@ static void pwrkeep_task(void *arg)
                 power_off();
             }
             else {
-                // 在按住过程中，用第二颗 LED 显示红色并缓慢变暗
+                // 在按住过程中，用第二颗系统 LED 显示红色并缓慢变暗
                 // 亮度随剩余时间线性减小，从 255 到 0
                 uint32_t rem = (press_ms >= LONG_PRESS_MS) ? 0 : (LONG_PRESS_MS - press_ms);
                 uint8_t val = (uint8_t)((rem * 255) / LONG_PRESS_MS);
                 // idx=1 为第二颗灯（0-based）
-                led_ctrl_set_led_color(1, val, 0, 0);
+                pet_power_led_set_power_key_override(true, val);
             }
         }
         else {
@@ -305,8 +306,8 @@ static void pwrkeep_task(void *arg)
                          press_ms);
             }
 
-            // 松开时关闭第二颗灯
-            led_ctrl_set_led_color(1, 0, 0, 0);
+            // 松开时恢复第二颗系统状态灯
+            pet_power_led_set_power_key_override(false, 0);
 
             press_ms = 0;
         }

@@ -52,17 +52,28 @@ pet_state_t decide_raw_from_history(pet_behavior_handle_t h,
     }
 
     bool enough_rest = s->rest >= c->rest_enter_votes ||
-                       (s->rest >= (s->valid >= 5 ? 4 : s->valid) && s->avg_rest >= 70.0f);
+                       (s->valid <= 3 && s->rest >= s->valid && s->avg_rest >= 70.0f);
 
     bool enough_play = s->play >= c->play_enter_votes &&
                        s->avg_play >= 62.0f &&
                        s->avg_irregular >= 48.0f;
 
-    bool enough_run = s->run >= c->run_enter_votes &&
-                      s->avg_run >= 56.0f &&
-                      s->avg_activity >= 54.0f &&
-                      s->avg_rhythm >= 28.0f &&
-                      s->avg_irregular < 75.0f;
+    /*
+     * v12 持续 RUN + 楼道 WALK 保护：
+     *
+     * 楼道走路样本中会出现短时高 gyro、d_roll 甚至旧协议短暂判 3，
+     * 但高身体方差不连续；全速跑样本则是连续多秒高身体运动。
+     * 因此 RUN 不看单次强晃动，必须最近约 7 秒里 5 秒像 RUN，
+     * 并且 avg_acc_std / avg_acc_delta / avg_acc_range / avg_gyro 同时够高。
+     */
+    bool enough_run = s->valid >= 7 &&
+                      s->run >= c->run_enter_votes &&
+                      s->avg_run >= 50.0f &&
+                      s->avg_activity >= 70.0f &&
+                      s->avg_acc_std >= 0.62f &&
+                      s->avg_acc_delta >= 0.155f &&
+                      s->avg_acc_range >= 1.85f &&
+                      s->avg_gyro_mean >= 105.0f;
 
     bool enough_active =
         s->active >= c->active_enter_votes ||
@@ -83,7 +94,7 @@ pet_state_t decide_raw_from_history(pet_behavior_handle_t h,
         raw = PET_STATE_RUN;
         conf = clampf_local(45.0f + s->avg_run * 0.35f + s->avg_rhythm * 0.20f, 0.0f, 100.0f);
     }
-    else if ((s->trot + s->run) >= 3 && s->avg_activity >= 45.0f)
+    else if ((s->trot + s->run) >= (s->valid >= 3 ? 2 : s->valid) && s->avg_activity >= 45.0f)
     {
         raw = PET_STATE_TROT;
         conf = clampf_local(45.0f + s->avg_activity * 0.40f, 0.0f, 92.0f);
@@ -179,21 +190,24 @@ uint32_t transition_required_ms(pet_state_t current, pet_state_t target)
         return 0;
 
     if (target == PET_STATE_REST || target == PET_STATE_SLEEP)
-        return 3500;
+        return 1800;
 
     if ((current == PET_STATE_REST || current == PET_STATE_SLEEP || current == PET_STATE_NOT_WORN) &&
         (target == PET_STATE_WALK || target == PET_STATE_TROT || target == PET_STATE_RUN))
-        return 2500;
+        return 900;
 
-    /* PLAY/RUN 已经经过多窗口投票，这里再给一点兜底即可。 */
-    if (target == PET_STATE_PLAY || target == PET_STATE_RUN)
-        return 1000;
+    /* RUN 已经由 7 秒历史确认，状态机只需再轻微防抖。 */
+    if (target == PET_STATE_RUN)
+        return 800;
+
+    if (target == PET_STATE_PLAY)
+        return 900;
 
     /* PLAY/RUN 回 WALK 要快一些，但不直接跳 REST。 */
     if ((current == PET_STATE_PLAY || current == PET_STATE_RUN) && target == PET_STATE_WALK)
-        return 1000;
+        return 700;
 
-    return 2000;
+    return 1200;
 }
 
 pet_state_t apply_raw_state_machine(pet_behavior_handle_t h,
